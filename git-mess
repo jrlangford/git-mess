@@ -272,17 +272,26 @@ cmd_untracked() {
     fi
     [ -d "$dir" ] || { echo "git-mess: no such directory: $dir" >&2; exit 1; }
     dir=$(cd "$dir" && pwd)
-    local tracked r f tp
-    tracked=$(g for-each-ref --format='%(refname)' 'refs/mess/' | while IFS= read -r r; do
+    local prefix r tracked_tmp
+    if [ -n "$ROOT" ]; then prefix="$ROOT/"; else prefix="/"; fi
+    tracked_tmp=$(mktemp)
+    g for-each-ref --format='%(refname)' 'refs/mess/' | while IFS= read -r r; do
         g ls-tree -r --name-only "$r"
-    done | sort -u)
-    # skip .git dirs and any subtree owned by another mess
+    done | sort -u > "$tracked_tmp"
+    # skip .git dirs and any subtree owned by another mess; the set-difference
+    # runs as ONE awk pass (hash lookup per file), not a grep per file
     find "$dir" -mindepth 1 -type d \
             \( -name .git -o -name .git-mess.git -o -exec test -d '{}/.git-mess.git' \; \) -prune \
-            -o -type f -print | while IFS= read -r f; do
-        tp=$(tree_path "$f")
-        if ! printf '%s\n' "$tracked" | grep -qxF "$tp"; then echo "$f"; fi
-    done
+            -o -type f -print \
+        | awk -v p="$prefix" -v tf="$tracked_tmp" '
+            BEGIN { while ((getline line < tf) > 0) tracked[line] = 1 }
+            {
+                tp = $0
+                if (index(tp, p) == 1) tp = substr(tp, length(p) + 1)
+                else sub(/^\//, "", tp)
+                if (!(tp in tracked)) print
+            }'
+    rm -f "$tracked_tmp"
 }
 
 cmd_show() {

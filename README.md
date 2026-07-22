@@ -142,6 +142,8 @@ It scans a directory tree — by default the store root for a local mess, or the
 
 Pipe it into `snapshot` to adopt strays: `git mess untracked | xargs -I{} git mess snapshot {}`.
 
+Performance: the scan is a single `find` streamed through a single `awk` set-lookup, so cost is dominated by walking the directory tree itself, not by how many files or histories there are. For a huge tree, bound the scan by passing a subdirectory. (Files with embedded newlines in their names will confuse the line-based matching — don't do that to yourself.)
+
 ### log — see a history's versions
 
 ```bash
