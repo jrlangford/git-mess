@@ -39,11 +39,16 @@ usage: git mess <command> [args]
   clone <url> [<dir>]                             copy a remote mess and materialize its files
   snapshot <file>... [-n <name>] [-m <msg>] [-f]  record a new version (-f: allow a file
                                                   already tracked by another history)
+  snapshot --all [-m <msg>]                       re-snapshot every changed history
+  diff [--disk]                                   diff every history (no name = whole mess)
   list                                            list all histories
   status [<name>...]                              disk vs last snapshot (all if no name)
+  untracked [<dir>]                               files no history tracks (default: store
+                                                  root, or cwd for the global store)
   log <name>                                      show a history's versions
   show <name> [<rev>] [<path>]                    print file content at a version
-  diff <name> [<rev1> [<rev2>]]                   diff versions (default: last change)
+  diff <name> [<rev1> [<rev2>]] [--disk]          diff versions (default: last change);
+                                                  --disk: a version (default tip) vs disk
   restore <name>|--all [<rev>]                    write files back to their paths
   move <old-name> <new-name>                      rename a history; if its file is still
                                                   on disk, move the file too
@@ -75,6 +80,24 @@ tree_path() {
 # Tree path -> filesystem path.
 disk_path() {
     if [ -n "$ROOT" ]; then printf '%s\n' "$ROOT/$1"; else printf '%s\n' "/$1"; fi
+}
+
+# Build a throwaway tree from the current disk contents of <rev>'s files.
+# Missing files are omitted (they show as deletions when diffed).
+disk_tree() {
+    local rev="$1" path dest blob mode dtdir
+    dtdir=$(mktemp -d)
+    export GIT_INDEX_FILE="$dtdir/index"
+    g ls-tree -r --name-only "$rev" | while IFS= read -r path; do
+        dest=$(disk_path "$path")
+        [ -f "$dest" ] || continue
+        blob=$(g hash-object -w "$dest")
+        mode=100644; [ -x "$dest" ] && mode=100755
+        g update-index --add --cacheinfo "$mode,$blob,$path"
+    done
+    g write-tree
+    unset GIT_INDEX_FILE
+    rm -rf "$dtdir"
 }
 
 # Map a name/path to its ref. Args that exist as files use their canonical
@@ -116,16 +139,42 @@ cmd_init() {
     echo "(used automatically by git mess anywhere under $dir)"
 }
 
+snapshot_all() {
+    local msg="$1" ref name tip tree empty
+    empty=$(g hash-object -t tree /dev/null)
+    g for-each-ref --format='%(refname)' 'refs/mess/' | while IFS= read -r ref; do
+        name=${ref#refs/mess/}
+        tip=$(g rev-parse "$ref")
+        tree=$(disk_tree "$ref")
+        if [ "$tree" = "$(g rev-parse "$ref^{tree}")" ]; then
+            echo "$name  (clean)"
+        elif [ "$tree" = "$empty" ]; then
+            echo "$name  (all files missing — skipped; use 'git mess delete' if intended)"
+        else
+            local commit
+            commit=$(g commit-tree "$tree" -m "${msg:-snapshot: $name}" -p "$tip")
+            g update-ref "$ref" "$commit"
+            echo "$name -> $(g rev-parse --short "$commit")"
+        fi
+    done
+}
+
 cmd_snapshot() {
-    local name="" msg="" force=0 files=()
+    local name="" msg="" force=0 all=0 files=()
     while [ $# -gt 0 ]; do
         case "$1" in
             -n) name="$2"; shift 2 ;;
             -m) msg="$2"; shift 2 ;;
             -f) force=1; shift ;;
+            --all) all=1; shift ;;
             *)  files+=("$1"); shift ;;
         esac
     done
+    if [ "$all" -eq 1 ]; then
+        ensure_store
+        snapshot_all "$msg"
+        return 0
+    fi
     [ -n "${files[*]:-}" ] || usage
     if [ -z "$name" ]; then
         [ ${#files[@]} -eq 1 ] || { echo "git-mess: multi-file snapshots need -n <name>" >&2; exit 1; }
@@ -215,6 +264,27 @@ cmd_status() {
     done
 }
 
+cmd_untracked() {
+    ensure_store
+    local dir="${1:-}"
+    if [ -z "$dir" ]; then
+        if [ -n "$ROOT" ]; then dir="$ROOT"; else dir="$PWD"; fi
+    fi
+    [ -d "$dir" ] || { echo "git-mess: no such directory: $dir" >&2; exit 1; }
+    dir=$(cd "$dir" && pwd)
+    local tracked r f tp
+    tracked=$(g for-each-ref --format='%(refname)' 'refs/mess/' | while IFS= read -r r; do
+        g ls-tree -r --name-only "$r"
+    done | sort -u)
+    # skip .git dirs and any subtree owned by another mess
+    find "$dir" -mindepth 1 -type d \
+            \( -name .git -o -name .git-mess.git -o -exec test -d '{}/.git-mess.git' \; \) -prune \
+            -o -type f -print | while IFS= read -r f; do
+        tp=$(tree_path "$f")
+        if ! printf '%s\n' "$tracked" | grep -qxF "$tp"; then echo "$f"; fi
+    done
+}
+
 cmd_show() {
     local ref; ref=$(resolve_ref "$1")
     local rev="${2:-}" path="${3:-}"
@@ -243,14 +313,41 @@ cmd_show() {
 }
 
 cmd_diff() {
-    local ref; ref=$(resolve_ref "$1")
-    local from="${2:-}"
+    local disk=0 args=() a
+    for a in "$@"; do
+        case "$a" in --disk|-d) disk=1 ;; *) args+=("$a") ;; esac
+    done
+    if [ -z "${args[*]:-}" ]; then
+        # no name: diff the whole mess, one section per changed history
+        ensure_store
+        local wref wname wfrom out
+        g for-each-ref --format='%(refname)' 'refs/mess/' | while IFS= read -r wref; do
+            wname=${wref#refs/mess/}
+            if [ "$disk" -eq 1 ]; then
+                out=$(g diff -M "$wref" "$(disk_tree "$wref")")
+            else
+                wfrom=$(g rev-parse -q --verify "$wref~1" 2>/dev/null) \
+                    || wfrom=$(g hash-object -t tree /dev/null)
+                out=$(g diff -M "$wfrom" "$wref")
+            fi
+            if [ -n "$out" ]; then printf '=== %s ===\n%s\n' "$wname" "$out"; fi
+        done
+        return 0
+    fi
+    local ref; ref=$(resolve_ref "${args[0]}")
+    if [ "$disk" -eq 1 ]; then
+        # a version (default tip) vs. what's on disk right now
+        local rev="${args[1]:-$ref}"
+        g diff -M "$rev" "$(disk_tree "$rev")"
+        return 0
+    fi
+    local from="${args[1]:-}"
     if [ -z "$from" ]; then
         # first version has no parent: diff against the empty tree
         from=$(g rev-parse -q --verify "$ref~1" 2>/dev/null) \
             || from=$(g hash-object -t tree /dev/null)
     fi
-    g diff -M "$from" "${3:-$ref}"
+    g diff -M "$from" "${args[2]:-$ref}"
 }
 
 restore_ref() {
@@ -372,9 +469,10 @@ case "$cmd" in
     snapshot) cmd_snapshot "$@" ;;
     list)     cmd_list ;;
     status)   cmd_status "$@" ;;
+    untracked) cmd_untracked "${1:-}" ;;
     log)      cmd_log "${1:?usage: git mess log <name>}" ;;
     show)     cmd_show "${1:?usage: git mess show <name> [rev] [path]}" "${2:-}" "${3:-}" ;;
-    diff)     cmd_diff "${1:?usage: git mess diff <name> [rev1 [rev2]]}" "${2:-}" "${3:-}" ;;
+    diff)     cmd_diff "$@" ;;
     restore)  cmd_restore "${1:?usage: git mess restore <name>|--all [rev]}" "${2:-}" ;;
     move|mv)  cmd_move "${1:?usage: git mess move <old-name> <new-name>}" "${2:?usage: git mess move <old-name> <new-name>}" ;;
     delete)   cmd_delete "$@" ;;

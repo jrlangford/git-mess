@@ -98,6 +98,17 @@ git-mess: a.txt is already tracked by mess 'bundle'; add -f to force double trac
 
 Add `-f` if you really mean it — but know that `restore` and `move` on either history will then fight over the same file.
 
+To record everything at once — the mess equivalent of `git commit -a` — use `--all`:
+
+```bash
+$ git mess snapshot --all -m "end of day"
+notes.txt -> 1ee6c43
+my-configs -> 26e6bb5
+scratch.py  (clean)
+```
+
+Every history with unsnapshotted changes gets a new version from what's on disk; clean ones are left alone. A history whose files are *all* missing from disk is skipped with a warning rather than recorded as emptied — deleting is `git mess delete`'s job, not `snapshot --all`'s.
+
 ### list — see all histories
 
 ```bash
@@ -117,6 +128,19 @@ my-configs
 ```
 
 Compares each history's latest snapshot against what's on disk right now: `modified` means the file's content differs, `missing` means it's gone from its recorded path (deleted — or moved; see `move`). Clean histories are listed on one line. Like `git status`, it changes nothing — run it before `snapshot` to see what a new version would capture, or before `restore` to see what you'd overwrite.
+
+### untracked — files no history covers
+
+The other half of `git status`: `status` reports drift in what *is* tracked; `untracked` finds what isn't:
+
+```bash
+$ git mess untracked
+/home/you/scratch/stray.txt
+```
+
+It scans a directory tree — by default the store root for a local mess, or the current directory for the global one (whose root, `/`, would be absurd to scan) — and lists files not present in any history's latest version. Pass a directory to scan somewhere else. Subtrees owned by *another* mess (containing their own `.git-mess.git`) and `.git` directories are skipped: those files are someone else's jurisdiction. Note that files tracked by a regular git repository still count as untracked here — the mess doesn't know or care what git tracks.
+
+Pipe it into `snapshot` to adopt strays: `git mess untracked | xargs -I{} git mess snapshot {}`.
 
 ### log — see a history's versions
 
@@ -154,6 +178,24 @@ git mess diff notes.txt 5a326c0 00c1d0b      # any two versions
 ```
 
 Renames are detected across versions (`rename from/to` with a similarity score). If a history has only one version, `diff` shows it as all additions against nothing.
+
+To see **unsnapshotted edits** — what's on disk versus what the history has — add `--disk` (`-d`), the mess equivalent of plain `git diff`:
+
+```bash
+git mess diff notes.txt --disk               # disk vs. latest snapshot
+git mess diff notes.txt 5a326c0 --disk       # disk vs. an older version
+```
+
+An empty diff means the disk matches (what `status` calls clean); a file missing from its recorded path shows as deleted. `--disk` is read-only — it never records anything.
+
+Omit the name to diff the **whole mess** — every history, one `=== name ===` section per history with changes:
+
+```bash
+git mess diff --disk        # all unsnapshotted edits across the mess
+git mess diff               # every history's most recent recorded change
+```
+
+`diff --disk` (nothing to snapshot?) and `snapshot --all` (record it all) are natural companions: review, then commit.
 
 ### restore — write files back to disk
 
