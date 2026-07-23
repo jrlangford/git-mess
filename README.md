@@ -8,14 +8,13 @@ A mess is a hidden bare object store (`.git-mess.git`, created by `git mess init
 
 ## Installation
 
-`git-mess` is a single bash script with no dependencies beyond `git` itself.
-
-Put it on your `PATH` under the name `git-mess`, and git will automatically expose it as a subcommand:
+`git-mess` is a Go program whose only runtime dependency is `git` itself — every object operation shells out to git plumbing, nothing is reimplemented.
 
 ```bash
-ln -s /path/to/git-mess ~/.local/bin/git-mess   # or wherever you keep executables
-git mess list                                    # now works from any directory
+go install github.com/jrlangford/git-mess/cmd/git-mess@latest
 ```
+
+This puts a `git-mess` binary in `$(go env GOPATH)/bin` (usually `~/go/bin`); with that directory on your `PATH`, git automatically exposes it as `git mess`. From a checkout, `go install ./cmd/git-mess` does the same, and `go test ./...` runs the test suite.
 
 Then make your first mess:
 
