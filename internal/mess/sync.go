@@ -179,6 +179,58 @@ func (s *Store) clearNS(ns string) {
 	}
 }
 
+// syncState classifies one history's relationship to a remote's state. The
+// SAME classification drives pull (which acts) and fetch (which previews),
+// so the preview can never drift from the action.
+type syncState int
+
+const (
+	stateNone syncState = iota
+	stateRemoteDeleted
+	stateRemoteDeletedLocalNewer
+	stateLocallyDeleted
+	stateNew
+	stateUpToDate
+	stateFastForward
+	stateLocalAhead
+	stateDiverged
+)
+
+// classify compares remote refs (R: history, Ti: tombstone) against local
+// state. revive means a local tombstone is outdated by a newer remote
+// version and should be dropped before acting on the returned state.
+func (s *Store) classify(R string, rOk bool, Ti string, tiOk bool, L string, lOk bool, T string, tOk bool) (revive bool, st syncState) {
+	// the remote's latest word is "deleted" if its tombstone postdates its snapshot
+	if tiOk && (!rOk || s.Epoch(Ti) > s.Epoch(R)) {
+		if lOk && s.Epoch(L) > s.Epoch(Ti) {
+			return false, stateRemoteDeletedLocalNewer
+		}
+		return false, stateRemoteDeleted
+	}
+	if !rOk {
+		return false, stateNone
+	}
+	if tOk {
+		if s.Epoch(R) > s.Epoch(T) {
+			revive = true
+		} else {
+			return false, stateLocallyDeleted
+		}
+	}
+	switch {
+	case !lOk:
+		return revive, stateNew
+	case L == R:
+		return revive, stateUpToDate
+	case s.mergeBase(L, R) == L:
+		return revive, stateFastForward
+	case s.mergeBase(L, R) == R:
+		return revive, stateLocalAhead
+	default:
+		return revive, stateDiverged
+	}
+}
+
 func (s *Store) pullOne(name string, out io.Writer) error {
 	R, rOk := s.RevParse("refs/mess-incoming/" + name)
 	Ti, tiOk := s.RevParse("refs/mess-tombstones-incoming/" + name)
@@ -186,12 +238,20 @@ func (s *Store) pullOne(name string, out io.Writer) error {
 	T, tOk := s.RevParse("refs/mess-tombstones/" + name)
 	ref := "refs/mess/" + name
 
-	// the remote's latest word is "deleted" if its tombstone postdates its snapshot
-	if tiOk && (!rOk || s.Epoch(Ti) > s.Epoch(R)) {
-		if lOk && s.Epoch(L) > s.Epoch(Ti) {
-			fmt.Fprintf(out, "%s: remote deleted it, but local is newer — keeping (push to revive remotely)\n", name)
-			return nil
+	revive, st := s.classify(R, rOk, Ti, tiOk, L, lOk, T, tOk)
+	if revive {
+		if _, err := s.Git("update-ref", "-d", "refs/mess-tombstones/"+name); err != nil {
+			return err
 		}
+		fmt.Fprintf(out, "%s: revived by newer remote version\n", name)
+	}
+	switch st {
+	case stateNone:
+		return nil
+	case stateRemoteDeletedLocalNewer:
+		fmt.Fprintf(out, "%s: remote deleted it, but local is newer — keeping (push to revive remotely)\n", name)
+		return nil
+	case stateRemoteDeleted:
 		if lOk {
 			if _, err := s.Git("update-ref", "-d", ref); err != nil {
 				return err
@@ -200,33 +260,19 @@ func (s *Store) pullOne(name string, out io.Writer) error {
 		}
 		_, err := s.Git("update-ref", "refs/mess-tombstones/"+name, Ti)
 		return err
-	}
-	if !rOk {
+	case stateLocallyDeleted:
+		fmt.Fprintf(out, "%s: deleted locally (tombstone is newer) — push will propagate the deletion\n", name)
 		return nil
-	}
-	if tOk {
-		if s.Epoch(R) > s.Epoch(T) {
-			if _, err := s.Git("update-ref", "-d", "refs/mess-tombstones/"+name); err != nil {
-				return err
-			}
-			fmt.Fprintf(out, "%s: revived by newer remote version\n", name)
-		} else {
-			fmt.Fprintf(out, "%s: deleted locally (tombstone is newer) — push will propagate the deletion\n", name)
-			return nil
-		}
-	}
-
-	switch {
-	case !lOk:
+	case stateNew:
 		if _, err := s.Git("update-ref", ref, R); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "%s: new -> %s\n", name, s.Short(R))
 		return s.syncRestore(ref, out)
-	case L == R:
+	case stateUpToDate:
 		fmt.Fprintf(out, "%s: up to date\n", name)
 		return nil
-	case s.mergeBase(L, R) == L:
+	case stateFastForward:
 		if s.IsDirty(ref) {
 			fmt.Fprintf(out, "%s: SKIPPED — unsnapshotted local changes (snapshot or restore, then pull again)\n", name)
 			return nil
@@ -236,16 +282,81 @@ func (s *Store) pullOne(name string, out io.Writer) error {
 		}
 		fmt.Fprintf(out, "%s: fast-forward -> %s\n", name, s.Short(R))
 		return s.RestoreRef(ref, ref, out)
-	case s.mergeBase(L, R) == R:
+	case stateLocalAhead:
 		fmt.Fprintf(out, "%s: local is ahead (push to publish)\n", name)
 		return nil
-	default:
+	default: // stateDiverged
 		if s.IsDirty(ref) {
 			fmt.Fprintf(out, "%s: SKIPPED — unsnapshotted local changes (snapshot or restore, then pull again)\n", name)
 			return nil
 		}
 		return s.mergeHistory(name, R, out)
 	}
+}
+
+// Fetch downloads remote state into refs/mess-fetched/* (and its tombstone
+// namespace) without touching histories or files, and previews what pull
+// would do with each name.
+func (s *Store) Fetch(remote, only string, out io.Writer) error {
+	if err := s.Ensure(); err != nil {
+		return err
+	}
+	if only != "" {
+		ref, err := s.NameToRef(only)
+		if err != nil {
+			return err
+		}
+		only = ShortName(ref)
+	}
+	s.clearNS("refs/mess-fetched")
+	s.clearNS("refs/mess-tombstones-fetched")
+	if _, err := s.Git("fetch", "-q", remote,
+		"+refs/mess/*:refs/mess-fetched/*",
+		"+refs/mess-tombstones/*:refs/mess-tombstones-fetched/*"); err != nil {
+		return err
+	}
+	names := map[string]bool{}
+	for _, r := range s.ForEachRef("refs/mess-fetched") {
+		names[strings.TrimPrefix(r, "refs/mess-fetched/")] = true
+	}
+	for _, r := range s.ForEachRef("refs/mess-tombstones-fetched") {
+		names[strings.TrimPrefix(r, "refs/mess-tombstones-fetched/")] = true
+	}
+	sorted := make([]string, 0, len(names))
+	for n := range names {
+		sorted = append(sorted, n)
+	}
+	sort.Strings(sorted)
+	preview := map[syncState]string{
+		stateRemoteDeleted:           "deleted on remote (pull will delete locally)",
+		stateRemoteDeletedLocalNewer: "deleted on remote, but local is newer (pull keeps yours)",
+		stateLocallyDeleted:          "deleted locally (push will propagate the deletion)",
+		stateNew:                     "new (pull will adopt)",
+		stateUpToDate:                "up to date",
+		stateFastForward:             "remote ahead (pull will fast-forward)",
+		stateLocalAhead:              "local ahead (push to publish)",
+		stateDiverged:                "diverged (pull will merge)",
+	}
+	for _, name := range sorted {
+		if only != "" && name != only {
+			continue
+		}
+		R, rOk := s.RevParse("refs/mess-fetched/" + name)
+		Ti, tiOk := s.RevParse("refs/mess-tombstones-fetched/" + name)
+		L, lOk := s.RevParse("refs/mess/" + name)
+		T, tOk := s.RevParse("refs/mess-tombstones/" + name)
+		revive, st := s.classify(R, rOk, Ti, tiOk, L, lOk, T, tOk)
+		if st == stateNone {
+			continue
+		}
+		line := preview[st]
+		if revive {
+			line += " — revives your deleted history"
+		}
+		fmt.Fprintf(out, "%s: %s\n", name, line)
+	}
+	fmt.Fprintf(out, "(fetched state kept under refs/mess-fetched/ in %s)\n", s.GitDir)
+	return nil
 }
 
 func (s *Store) mergeBase(a, b string) string {

@@ -355,6 +355,74 @@ func TestMovePropagatesWithoutResurrection(t *testing.T) {
 	}
 }
 
+func TestFetchPreviewsWithoutMutating(t *testing.T) {
+	hub, alice, bob, aliceDir, bobDir := twoUserSetup(t)
+
+	// remote ahead: alice pushes an edit
+	write(t, aliceDir+"/shared.txt", "l1 A\nl2\nl3\nl4\nl5\n")
+	chdir(t, aliceDir)
+	snap(t, alice, SnapshotOpts{}, "shared.txt")
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	before, _ := bob.RevParse("refs/mess/shared.txt")
+	var buf bytes.Buffer
+	if err := bob.Fetch(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "shared.txt: remote ahead (pull will fast-forward)") {
+		t.Fatalf("want fast-forward preview, got:\n%s", buf.String())
+	}
+	// nothing local moved
+	after, _ := bob.RevParse("refs/mess/shared.txt")
+	if before != after {
+		t.Error("fetch must not move history refs")
+	}
+	if read(t, bobDir+"/shared.txt") != "l1\nl2\nl3\nl4\nl5\n" {
+		t.Error("fetch must not touch files")
+	}
+	// fetched copy is kept locally
+	if _, ok := bob.RevParse("refs/mess-fetched/shared.txt"); !ok {
+		t.Error("fetched ref not retained")
+	}
+
+	// diverged: bob snapshots his own edit
+	write(t, bobDir+"/shared.txt", "l1\nl2\nl3\nl4\nl5 B\n")
+	chdir(t, bobDir)
+	snap(t, bob, SnapshotOpts{}, "shared.txt")
+	buf.Reset()
+	if err := bob.Fetch(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "shared.txt: diverged (pull will merge)") {
+		t.Errorf("want diverged preview, got:\n%s", buf.String())
+	}
+}
+
+func TestFetchPreviewsRemoteDeletion(t *testing.T) {
+	hub, alice, bob, _, _ := twoUserSetup(t)
+
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	if err := alice.Delete("shared.txt", true, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := bob.Fetch(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "shared.txt: deleted on remote (pull will delete locally)") {
+		t.Fatalf("want deletion preview, got:\n%s", buf.String())
+	}
+	if _, ok := bob.RevParse("refs/mess/shared.txt"); !ok {
+		t.Error("fetch must not apply the deletion")
+	}
+}
+
 func TestListRemote(t *testing.T) {
 	hub, alice, _, aliceDir, _ := twoUserSetup(t)
 
