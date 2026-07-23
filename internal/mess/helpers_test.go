@@ -86,6 +86,17 @@ func (w *testLogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// deleteFully archives then deletes: the two-step permanent removal.
+func deleteFully(t *testing.T, s *Store, name string, prune bool) {
+	t.Helper()
+	if err := s.Archive(name, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(name, prune, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // mustLogCount asserts how many versions a history has.
 func mustLogCount(t *testing.T, s *Store, name string, want int) {
 	t.Helper()

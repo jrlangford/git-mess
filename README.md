@@ -68,6 +68,8 @@ git mess show <name> [<rev>] [<path>]
 git mess diff <name> [<rev1> [<rev2>]]
 git mess restore <name>|--all [<rev>]
 git mess move <old-name> <new-name>
+git mess archive <name>
+git mess unarchive <name>
 git mess delete <name> [--prune]
 git mess push <remote> [<name>]
 git mess pull <remote> [<name>]
@@ -235,16 +237,22 @@ After this, `log` shows the full chain plus a `move:` entry, `status` is clean, 
 
 If you already moved the file yourself, `move` skips the filesystem step — pass the old name exactly as `git mess list` prints it, then `snapshot` from the new path to record it. Multi-file and `-n`-named histories only ever have their *label* renamed; files stay put. `mv` works as an alias.
 
-### delete — drop a history
+### archive and delete — the two-step end of life
+
+Removal is deliberately two-phased: **archiving** a history retires it recoverably, and **deleting** — the destructive step — only works on histories already archived, so a history can never go from alive to gone in one slip.
 
 ```bash
-git mess delete notes.txt            # drop the ref; objects linger until gc
-git mess delete notes.txt --prune    # drop the ref AND purge objects from disk now
+git mess archive notes.txt           # retire: hidden from list/status/diff, fully recoverable
+git mess unarchive notes.txt         # change of heart: back to active, history intact
+git mess list --archived             # see what's in the archive
+git mess delete notes.txt --prune    # permanent — only allowed on an archived history
 ```
 
-Without `--prune`, the history is unreachable but its objects remain in the store until garbage collection (git's default grace period is two weeks). With `--prune`, reflogs are expired and `git gc --prune=now` runs immediately — the content is actually gone from disk. Other histories are unaffected either way.
+`archive` moves the chain to an archive namespace under a timestamped marker; nothing is copied, files on disk are left alone, and the history simply vanishes from everyday commands. `snapshot` on an archived name automatically unarchives it (your work rescues the history), and archived files still count as known to `untracked`.
 
-Deletion also records a [tombstone](#deletion-tombstones) so that peers you sync with delete the history too, instead of resurrecting it back to you on the next pull.
+`delete` refuses active histories outright — `refusing to delete active history X — archive it first` — and permanently removes archived ones. Without `--prune`, the objects linger until garbage collection (git's default grace period is two weeks); with `--prune`, reflogs are expired and `git gc --prune=now` runs immediately — the content is actually gone from disk. Other histories are unaffected either way.
+
+Both steps propagate to peers: archiving syncs as a lifecycle change (see below), and deletion records a [tombstone](#deletion-tombstones) so peers delete too, instead of resurrecting the history back to you on the next pull.
 
 ## Authorship
 
@@ -298,6 +306,10 @@ Remotes are named the git way: `git mess remote add origin <hub>` stores the URL
 - Histories with **unsnapshotted local changes are skipped** untouched — snapshot or restore first, then pull again.
 
 `push` refuses cleanly when someone beat you to it (the hub rejects the non-fast-forward) and tells you to pull-merge first — the exact loop git users know.
+
+### Archives across the network
+
+Archiving syncs under the same newest-event-wins rule as everything else: your push retires the remote's active ref and publishes the archive; peers' pulls archive their copies (files left on disk). If someone snapshotted *after* the archiving, their work wins — pulls report `remote archived it, but local is newer`, their push restores the hub, and everyone else's pull prints `unarchived (remote has newer activity)` and reactivates. Nobody's newer work is ever silently shelved. `git mess list <remote>` marks remote archives `(archived)`, and `fetch` previews every archive transition before you pull it.
 
 ### Deletion tombstones
 

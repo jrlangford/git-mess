@@ -123,7 +123,14 @@ func (s *Store) Snapshot(files []string, o SnapshotOpts, out io.Writer) error {
 	}
 	short := ShortName(ref)
 	if _, ok := s.RevParse(ref); !ok {
-		if _, tOk := s.RevParse("refs/mess-tombstones/" + short); tOk {
+		if aTip, aOk := s.RevParse("refs/mess-archive/" + short); aOk {
+			// snapshotting an archived name brings it back to active use
+			if _, err := s.Git("update-ref", ref, aTip); err != nil {
+				return err
+			}
+			s.Git("update-ref", "-d", "refs/mess-archive/"+short)
+			fmt.Fprintf(out, "note: unarchiving %s\n", short)
+		} else if _, tOk := s.RevParse("refs/mess-tombstones/" + short); tOk {
 			s.Git("update-ref", "-d", "refs/mess-tombstones/"+short)
 			fmt.Fprintf(out, "note: reviving previously deleted history %s\n", short)
 		}
@@ -231,17 +238,21 @@ func (s *Store) SnapshotAll(msg string, out io.Writer) error {
 	return nil
 }
 
-// List prints every history with tip and age. With a remote, it lists the
-// remote's names instead — without fetching anything — marking tombstoned
-// (deleted) ones.
-func (s *Store) List(remote string, out io.Writer) error {
+// List prints every active history with tip and age. With archived=true it
+// lists the archive instead. With a remote, it lists the remote's names —
+// without fetching anything — marking archived and deleted ones.
+func (s *Store) List(remote string, archived bool, out io.Writer) error {
 	if err := s.Ensure(); err != nil {
 		return err
 	}
 	if remote != "" {
 		return s.listRemote(remote, out)
 	}
-	res, err := s.Git("for-each-ref", "refs/mess/",
+	ns := "refs/mess/"
+	if archived {
+		ns = "refs/mess-archive/"
+	}
+	res, err := s.Git("for-each-ref", ns,
 		"--format=%(refname:lstrip=2)  [%(objectname:short)]  %(creatordate:relative)")
 	if err != nil {
 		return err
@@ -253,11 +264,13 @@ func (s *Store) List(remote string, out io.Writer) error {
 }
 
 func (s *Store) listRemote(remote string, out io.Writer) error {
-	lsr, err := s.Git("ls-remote", remote, "refs/mess/*", "refs/mess-tombstones/*")
+	lsr, err := s.Git("ls-remote", remote,
+		"refs/mess/*", "refs/mess-archive/*", "refs/mess-tombstones/*")
 	if err != nil {
 		return err
 	}
 	histories := map[string]string{} // name -> sha
+	archives := map[string]string{}
 	tombstones := map[string]bool{}
 	var order []string
 	for _, line := range strings.Split(lsr, "\n") {
@@ -268,6 +281,8 @@ func (s *Store) listRemote(remote string, out io.Writer) error {
 		switch {
 		case strings.HasPrefix(ref, "refs/mess-tombstones/"):
 			tombstones[strings.TrimPrefix(ref, "refs/mess-tombstones/")] = true
+		case strings.HasPrefix(ref, "refs/mess-archive/"):
+			archives[strings.TrimPrefix(ref, "refs/mess-archive/")] = sha
 		case strings.HasPrefix(ref, "refs/mess/"):
 			name := ShortName(ref)
 			if _, seen := histories[name]; !seen {
@@ -276,21 +291,36 @@ func (s *Store) listRemote(remote string, out io.Writer) error {
 			histories[name] = sha
 		}
 	}
-	for _, name := range order {
-		sha := histories[name]
+	short7 := func(sha string) string {
 		if len(sha) > 7 {
-			sha = sha[:7]
+			return sha[:7]
 		}
-		line := fmt.Sprintf("%s  [%s]", name, sha)
+		return sha
+	}
+	for _, name := range order {
+		line := fmt.Sprintf("%s  [%s]", name, short7(histories[name]))
 		if tombstones[name] {
 			line += "  (tombstone pending)"
 		}
 		fmt.Fprintln(out, line)
 	}
+	// archived-only names
+	archivedOnly := make([]string, 0, len(archives))
+	for name := range archives {
+		if _, ok := histories[name]; !ok {
+			archivedOnly = append(archivedOnly, name)
+		}
+	}
+	sort.Strings(archivedOnly)
+	for _, name := range archivedOnly {
+		fmt.Fprintf(out, "%s  [%s]  (archived)\n", name, short7(archives[name]))
+	}
 	// names that exist only as tombstones: deleted on the remote
 	deleted := make([]string, 0, len(tombstones))
 	for name := range tombstones {
-		if _, ok := histories[name]; !ok {
+		_, isHist := histories[name]
+		_, isArch := archives[name]
+		if !isHist && !isArch {
 			deleted = append(deleted, name)
 		}
 	}
@@ -694,15 +724,89 @@ func (s *Store) Move(oldName, newName string, out io.Writer) error {
 	return nil
 }
 
-// Delete drops a history, leaving a tombstone so peers delete it too.
-// With prune, unreachable objects are purged from the store immediately.
-func (s *Store) Delete(name string, prune bool, out io.Writer) error {
+// Archive retires a history without destroying it: the chain moves to
+// refs/mess-archive/<name> under a timestamped marker commit, vanishing
+// from normal operations but fully recoverable with unarchive. Permanent
+// deletion is only allowed from the archive.
+func (s *Store) Archive(name string, out io.Writer) error {
 	ref, err := s.ResolveRef(name)
 	if err != nil {
 		return err
 	}
+	short := ShortName(ref)
 	tip, _ := s.RevParse(ref)
+	tree, err := s.Git("rev-parse", ref+"^{tree}")
+	if err != nil {
+		return err
+	}
+	// marker commit: same tree, parented on the tip — keeps the whole chain
+	// reachable and records WHEN the archiving happened (sync's clock)
+	marker, err := s.Git("commit-tree", tree, "-m", "archive: "+short, "-p", tip)
+	if err != nil {
+		return err
+	}
+	if _, err := s.Git("update-ref", "refs/mess-archive/"+short, marker); err != nil {
+		return err
+	}
 	if _, err := s.Git("update-ref", "-d", ref); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "archived: %s (unarchive to restore; delete for permanent removal)\n", short)
+	return nil
+}
+
+// Unarchive returns an archived history to active use.
+func (s *Store) Unarchive(name string, out io.Writer) error {
+	ref, err := s.NameToRef(name)
+	if err != nil {
+		return err
+	}
+	short := ShortName(ref)
+	tip, ok := s.RevParse("refs/mess-archive/" + short)
+	if !ok {
+		return fmt.Errorf("git-mess: no archived history: %s", name)
+	}
+	if _, active := s.RevParse(ref); active {
+		return fmt.Errorf("git-mess: history already active: %s", short)
+	}
+	if _, err := s.Git("update-ref", ref, tip); err != nil {
+		return err
+	}
+	if _, err := s.Git("update-ref", "-d", "refs/mess-archive/"+short); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "unarchived: %s -> %s\n", short, s.Short(tip))
+	return nil
+}
+
+// Delete permanently removes an ARCHIVED history, leaving a tombstone so
+// peers delete it too. Active histories are refused: archive first. With
+// prune, unreachable objects are purged from the store immediately.
+func (s *Store) Delete(name string, prune bool, out io.Writer) error {
+	ref, err := s.NameToRef(name)
+	if err != nil {
+		return err
+	}
+	short := ShortName(ref)
+	if _, active := s.RevParse(ref); active {
+		return fmt.Errorf(
+			"git-mess: refusing to delete active history %s — archive it first: git mess archive %s",
+			short, short)
+	}
+	aRef := "refs/mess-archive/" + short
+	tip, ok := s.RevParse(aRef)
+	if !ok {
+		return fmt.Errorf("git-mess: no archived history: %s", name)
+	}
+	// record the disposed chain's shas in the tombstone BEFORE deleting the
+	// ref: after --prune purges the objects, this list is the only proof
+	// that a given remote sha was part of what we knowingly deleted, which
+	// push's retirement guard needs
+	lineage, err := s.Git("rev-list", "-n", "64", tip)
+	if err != nil {
+		return err
+	}
+	if _, err := s.Git("update-ref", "-d", aRef); err != nil {
 		return err
 	}
 	// tombstone: an empty-tree commit NOT parented on the old chain, so the
@@ -712,14 +816,14 @@ func (s *Store) Delete(name string, prune bool, out io.Writer) error {
 		return err
 	}
 	ts, err := s.Git("commit-tree", empty, "-m",
-		fmt.Sprintf("tombstone: %s (was %s)", ShortName(ref), tip))
+		fmt.Sprintf("tombstone: %s (was %s)\n\ndisposed:\n%s", ShortName(ref), tip, lineage))
 	if err != nil {
 		return err
 	}
 	if _, err := s.Git("update-ref", "refs/mess-tombstones/"+ShortName(ref), ts); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "deleted history: %s (tombstoned — deletion propagates on push)\n", name)
+	fmt.Fprintf(out, "deleted archived history: %s (tombstoned — deletion propagates on push)\n", short)
 	if prune {
 		if _, err := s.Git("reflog", "expire", "--expire=now", "--all"); err != nil {
 			return err
@@ -759,13 +863,15 @@ func (s *Store) Untracked(dir string, out io.Writer) error {
 		return fmt.Errorf("git-mess: no such directory: %s", dir)
 	}
 	tracked := map[string]bool{}
-	for _, ref := range s.ForEachRef("refs/mess") {
-		paths, err := s.TreePaths(ref)
-		if err != nil {
-			continue
-		}
-		for _, p := range paths {
-			tracked[p] = true
+	for _, ns := range []string{"refs/mess", "refs/mess-archive"} {
+		for _, ref := range s.ForEachRef(ns) {
+			paths, err := s.TreePaths(ref)
+			if err != nil {
+				continue
+			}
+			for _, p := range paths {
+				tracked[p] = true
+			}
 		}
 	}
 	return filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {

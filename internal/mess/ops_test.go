@@ -278,9 +278,7 @@ func TestMoveOntoDeletedNameRevives(t *testing.T) {
 	s, dir := newLocalMess(t)
 	write(t, dir+"/dead.txt", "d\n")
 	snap(t, s, SnapshotOpts{}, "dead.txt")
-	if err := s.Delete("dead.txt", false, testWriter(t)); err != nil {
-		t.Fatal(err)
-	}
+	deleteFully(t, s, "dead.txt", false)
 	os.Remove(dir + "/dead.txt")
 
 	write(t, dir+"/live.txt", "l\n")
@@ -293,14 +291,96 @@ func TestMoveOntoDeletedNameRevives(t *testing.T) {
 	}
 }
 
+func TestArchiveLifecycle(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/f.txt", "content\n")
+	snap(t, s, SnapshotOpts{}, "f.txt")
+
+	// deleting an active history is refused
+	err := s.Delete("f.txt", false, testWriter(t))
+	if err == nil || !strings.Contains(err.Error(), "archive it first") {
+		t.Fatalf("want gated-delete error, got %v", err)
+	}
+
+	if err := s.Archive("f.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.RevParse("refs/mess/f.txt"); ok {
+		t.Error("archived history still active")
+	}
+	if _, ok := s.RevParse("refs/mess-archive/f.txt"); !ok {
+		t.Error("archive ref missing")
+	}
+	if read(t, dir+"/f.txt") != "content\n" {
+		t.Error("archive must not touch files on disk")
+	}
+
+	var buf bytes.Buffer
+	if err := s.List("", false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "f.txt") {
+		t.Errorf("archived history in active listing:\n%s", buf.String())
+	}
+	buf.Reset()
+	if err := s.List("", true, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "f.txt") {
+		t.Errorf("archived history missing from --archived listing:\n%s", buf.String())
+	}
+
+	if err := s.Unarchive("f.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	mustLogCount(t, s, "f.txt", 2) // v1 + archive marker
+	if _, ok := s.RevParse("refs/mess-archive/f.txt"); ok {
+		t.Error("archive ref should be gone after unarchive")
+	}
+}
+
+func TestSnapshotUnarchives(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/f.txt", "v1\n")
+	snap(t, s, SnapshotOpts{}, "f.txt")
+	if err := s.Archive("f.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	write(t, dir+"/f.txt", "v2\n")
+	out := snap(t, s, SnapshotOpts{}, "f.txt")
+	if !strings.Contains(out, "unarchiving") {
+		t.Fatalf("want unarchive note, got: %s", out)
+	}
+	mustLogCount(t, s, "f.txt", 3) // v1 + marker + v2
+	if _, ok := s.RevParse("refs/mess-archive/f.txt"); ok {
+		t.Error("archive ref should be gone after snapshot")
+	}
+}
+
+func TestUntrackedIgnoresArchived(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/known.txt", "k\n")
+	snap(t, s, SnapshotOpts{}, "known.txt")
+	if err := s.Archive("known.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := s.Untracked("", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "known.txt") {
+		t.Errorf("archived file should not be untracked:\n%s", buf.String())
+	}
+}
+
 func TestDeleteTombstoneAndRevive(t *testing.T) {
 	s, dir := newLocalMess(t)
 	write(t, dir+"/tmp.txt", "x\n")
 	snap(t, s, SnapshotOpts{}, "tmp.txt")
 
-	if err := s.Delete("tmp.txt", true, testWriter(t)); err != nil {
-		t.Fatal(err)
-	}
+	deleteFully(t, s, "tmp.txt", true)
 	if _, ok := s.RevParse("refs/mess/tmp.txt"); ok {
 		t.Fatal("history ref still exists after delete")
 	}
@@ -326,9 +406,7 @@ func TestDeletePrunePurgesObjects(t *testing.T) {
 	snap(t, s, SnapshotOpts{}, "secret.txt")
 	blob, _ := s.Git("hash-object", dir+"/secret.txt")
 
-	if err := s.Delete("secret.txt", true, testWriter(t)); err != nil {
-		t.Fatal(err)
-	}
+	deleteFully(t, s, "secret.txt", true)
 	if _, err := s.Git("cat-file", "-e", blob); err == nil {
 		t.Error("blob still present in store after delete --prune")
 	}

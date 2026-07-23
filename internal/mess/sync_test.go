@@ -216,9 +216,7 @@ func TestTombstonePropagation(t *testing.T) {
 	hub, alice, bob, _, bobDir := twoUserSetup(t)
 
 	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
-	if err := alice.Delete("shared.txt", true, testWriter(t)); err != nil {
-		t.Fatal(err)
-	}
+	deleteFully(t, alice, "shared.txt", true)
 	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -250,9 +248,7 @@ func TestNewestWinsRevival(t *testing.T) {
 
 	// alice deletes at T1
 	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
-	if err := alice.Delete("shared.txt", true, testWriter(t)); err != nil {
-		t.Fatal(err)
-	}
+	deleteFully(t, alice, "shared.txt", true)
 	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -280,9 +276,7 @@ func TestStaleTombstoneLosesToNewerRemote(t *testing.T) {
 
 	// bob deletes at T1
 	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
-	if err := bob.Delete("shared.txt", true, testWriter(t)); err != nil {
-		t.Fatal(err)
-	}
+	deleteFully(t, bob, "shared.txt", true)
 
 	// alice snapshots at T2 > T1 and pushes
 	t.Setenv("GIT_COMMITTER_DATE", "2030-01-03T00:00:00")
@@ -305,6 +299,105 @@ func TestStaleTombstoneLosesToNewerRemote(t *testing.T) {
 	}
 	if _, ok := bob.RevParse("refs/mess-tombstones/shared.txt"); ok {
 		t.Error("stale tombstone should be dropped")
+	}
+}
+
+func TestArchivePropagates(t *testing.T) {
+	hub, alice, bob, aliceDir, bobDir := twoUserSetup(t)
+
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	chdir(t, aliceDir)
+	if err := alice.Archive("shared.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	// hub: active gone, archive present
+	out, _ := RunGit("", "--git-dir", hub, "for-each-ref", "--format=%(refname)", "refs/mess/")
+	if strings.Contains(out, "refs/mess/shared.txt") {
+		t.Errorf("active ref survived on hub:\n%s", out)
+	}
+	if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess-archive/shared.txt"); err != nil {
+		t.Error("archive ref missing on hub")
+	}
+
+	// bob fetch previews, then pull applies
+	var buf bytes.Buffer
+	if err := bob.Fetch(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "archived on remote (pull will archive locally)") {
+		t.Fatalf("want archive preview, got:\n%s", buf.String())
+	}
+	buf.Reset()
+	if err := bob.Pull(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "archived (remote archive") {
+		t.Fatalf("want archive application, got:\n%s", buf.String())
+	}
+	if _, ok := bob.RevParse("refs/mess/shared.txt"); ok {
+		t.Error("bob's active ref should be gone")
+	}
+	if _, ok := bob.RevParse("refs/mess-archive/shared.txt"); !ok {
+		t.Error("bob should hold the archive")
+	}
+	if _, err := os.Stat(bobDir + "/shared.txt"); err != nil {
+		t.Error("bob's file must stay on disk")
+	}
+}
+
+func TestSnapshotAfterArchiveWinsAcrossSync(t *testing.T) {
+	hub, alice, bob, _, bobDir := twoUserSetup(t)
+
+	// alice archives at T1 and pushes
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	if err := alice.Archive("shared.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	// bob keeps working at T2 > T1 (he hasn't pulled the archive)
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-03T00:00:00")
+	write(t, bobDir+"/shared.txt", "l1 bob\nl2\nl3\nl4\nl5\n")
+	chdir(t, bobDir)
+	snap(t, bob, SnapshotOpts{}, "shared.txt")
+
+	var buf bytes.Buffer
+	if err := bob.Pull(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "remote archived it, but local is newer") {
+		t.Fatalf("newer local work must survive an archive, got:\n%s", buf.String())
+	}
+	if _, ok := bob.RevParse("refs/mess/shared.txt"); !ok {
+		t.Error("bob's active history was wrongly archived")
+	}
+
+	// bob's push restores the hub: active back, stale archive retired
+	if err := bob.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess/shared.txt"); err != nil {
+		t.Error("hub active ref not restored")
+	}
+	if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess-archive/shared.txt"); err == nil {
+		t.Error("stale archive ref should be retired from hub")
+	}
+
+	// and alice's pull unarchives her copy
+	buf.Reset()
+	if err := alice.Pull(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "unarchived (remote has newer activity)") {
+		t.Fatalf("want reactivation on alice's side, got:\n%s", buf.String())
+	}
+	if _, ok := alice.RevParse("refs/mess/shared.txt"); !ok {
+		t.Error("alice's history should be active again")
 	}
 }
 
@@ -473,9 +566,7 @@ func TestFetchPreviewsRemoteDeletion(t *testing.T) {
 	hub, alice, bob, _, _ := twoUserSetup(t)
 
 	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
-	if err := alice.Delete("shared.txt", true, testWriter(t)); err != nil {
-		t.Fatal(err)
-	}
+	deleteFully(t, alice, "shared.txt", true)
 	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +594,7 @@ func TestListRemote(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := alice.List(hub, &buf); err != nil {
+	if err := alice.List(hub, false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -519,14 +610,12 @@ func TestListRemote(t *testing.T) {
 	}
 
 	// delete one history: remote list must mark it deleted
-	if err := alice.Delete("second.txt", true, testWriter(t)); err != nil {
-		t.Fatal(err)
-	}
+	deleteFully(t, alice, "second.txt", true)
 	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
 		t.Fatal(err)
 	}
 	buf.Reset()
-	if err := alice.List(hub, &buf); err != nil {
+	if err := alice.List(hub, false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	out = buf.String()
@@ -547,7 +636,7 @@ func TestListLocalUnaffectedByRemoteArg(t *testing.T) {
 	snap(t, s, SnapshotOpts{}, "only.txt")
 
 	var buf bytes.Buffer
-	if err := s.List("", &buf); err != nil {
+	if err := s.List("", false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "only.txt") {

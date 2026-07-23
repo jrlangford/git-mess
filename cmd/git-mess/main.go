@@ -17,8 +17,9 @@ const usage = `usage: git mess <command> [args]
   snapshot <file>... [-n <name>] [-m <msg>] [-f]  record a new version (-f: allow a file
                                                   already tracked by another history)
   snapshot --all [-m <msg>]                       re-snapshot every changed history
-  list [<remote>]                                 list all histories; with a remote, list
-                                                  its names (no fetch), marking deleted ones
+  list [<remote>] [--archived]                    list active histories; --archived lists
+                                                  the archive; with a remote, list its names
+                                                  (no fetch), marking archived/deleted ones
   status [<name>...]                              disk vs last snapshot (all if no name)
   untracked [<dir>]                               files no history tracks (default: store
                                                   root, or cwd for the global store)
@@ -29,8 +30,11 @@ const usage = `usage: git mess <command> [args]
   restore <name>|--all [<rev>]                    write files back to their paths
   move <old-name> <new-name>                      rename a history; if its file is still
                                                   on disk, move the file too
-  delete <name> [--prune]                         drop a history (--prune: gc now);
-                                                  leaves a tombstone so peers delete too
+  archive <name>                                  retire a history, keeping it recoverable
+  unarchive <name>                                return an archived history to active use
+  delete <name> [--prune]                         permanently remove an ARCHIVED history
+                                                  (--prune: gc now); leaves a tombstone so
+                                                  peers delete too; active names are refused
   remote [add <name> <url> | remove <name>]       manage named remotes; no args lists them
   push [<remote> [<name>]]                        publish histories, tombstones, deletions
   fetch [<remote> [<name>]]                       download remote state and preview what
@@ -109,7 +113,26 @@ func main() {
 			err = s.Snapshot(files, o, out)
 		}
 	case "list":
-		err = s.List(arg(args, 0), out)
+		archived := false
+		remote := ""
+		for _, a := range args {
+			if a == "--archived" {
+				archived = true
+			} else {
+				remote = a
+			}
+		}
+		err = s.List(remote, archived, out)
+	case "archive":
+		if len(args) < 1 {
+			usageExit()
+		}
+		err = s.Archive(args[0], out)
+	case "unarchive":
+		if len(args) < 1 {
+			usageExit()
+		}
+		err = s.Unarchive(args[0], out)
 	case "status":
 		err = s.Status(args, out)
 	case "untracked":
