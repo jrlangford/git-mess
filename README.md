@@ -70,6 +70,9 @@ git mess diff <name> [<rev1> [<rev2>]]
 git mess restore <name>|--all [<rev>]
 git mess move <old-name> <new-name>
 git mess delete <name> [--prune]
+git mess push <remote> [<name>]
+git mess pull <remote> [<name>]
+git mess hub-init <path>
 ```
 
 A `<name>` identifies one history. When you snapshot a single file without `-n`, the name defaults to the file's path — relative to the store root for local stores, absolute for the global store — so you can refer to the history by the file path itself. A `<rev>` is any git revision expression — most commonly a short SHA copied from `git mess log`.
@@ -232,6 +235,8 @@ git mess delete notes.txt --prune    # drop the ref AND purge objects from disk 
 
 Without `--prune`, the history is unreachable but its objects remain in the store until garbage collection (git's default grace period is two weeks). With `--prune`, reflogs are expired and `git gc --prune=now` runs immediately — the content is actually gone from disk. Other histories are unaffected either way.
 
+Deletion also records a [tombstone](#deletion-tombstones) so that peers you sync with delete the history too, instead of resurrecting it back to you on the next pull.
+
 ## Authorship
 
 Snapshots are ordinary git commits, so each one carries an author name, email, and timestamp automatically. Identity resolves exactly as in git:
@@ -250,9 +255,52 @@ GIT_AUTHOR_NAME="Robot Cleanup" GIT_AUTHOR_EMAIL=bot@example.com \
 
 `git mess log` shows the author of each version. This matters most for shared stores: if several people (or machines, or cron jobs) push into the same remote store, the author field tells you who made each version. Note this is plain metadata, not authentication — anyone can set any name, just as in git generally (commit signing would be the upgrade path if you ever need proof).
 
-## Pushing and pulling
+## Collaboration
 
-A mess history is an ordinary chain of commits under a ref, so it can be pushed to and fetched from any git repository — another bare store, a machine over SSH, or a hosted remote. There are no `git mess` subcommands for this (yet); use git directly against the store.
+Several people (or machines) can share a mess through a **hub** — which is *not* a special kind of repository, just an ordinary bare store that everyone pushes to and pulls from, configured to protect shared history:
+
+```bash
+$ git mess hub-init /srv/team-mess.git      # or on a server, or a GitHub repo
+hub store created: /srv/team-mess.git
+  history rewrites: DENIED (fast-forward only — nobody can erase a peer's versions)
+  ref deletions:    ALLOWED (tombstoned deletes propagate; run gc there to purge)
+```
+
+The two config lines are `receive.denyNonFastForwards=true` and `receive.denyDeletes=false`. Note these are independent switches: **fast-forward-only does not prevent deletion.** Rewriting a ref (pointing it at a non-descendant) and deleting a ref are separate operations in git, so the hub can refuse rewrites while still letting a tombstoned deletion land — and content is truly purged from the hub whenever a gc runs there.
+
+The daily workflow is two commands:
+
+```bash
+git mess push <hub>            # publish local snapshots, tombstones, deletions
+git mess pull <hub>            # fetch; fast-forward or 3-way merge each history
+```
+
+`pull` handles each history independently:
+
+- **New on the remote** → adopted and restored to disk (unless a differing local file is in the way — then the ref is adopted but your file is left alone).
+- **Remote ahead** → fast-forwarded, files updated.
+- **Local ahead** → left alone; `push` publishes it.
+- **Diverged** (you both snapshotted) → a **3-way merge**: the common ancestor comes from `git merge-base`, and each file is merged with `git merge-file`. Non-overlapping edits combine cleanly into a merge version with both chains as parents. Overlapping edits produce standard conflict markers, which are **written to the file and recorded**, loudly flagged — edit the file and `snapshot` to resolve. (Recording the conflicted state keeps everyone's graphs converged, so a half-resolved state can never fork the team; the tradeoff is that markers exist in history until resolved.)
+- Histories with **unsnapshotted local changes are skipped** untouched — snapshot or restore first, then pull again.
+
+`push` refuses cleanly when someone beat you to it (the hub rejects the non-fast-forward) and tells you to pull-merge first — the exact loop git users know.
+
+### Deletion tombstones
+
+Distributed deletion has a resurrection problem: if you delete a history and later pull from a peer who still has it, it would come back looking like new data. So `delete` leaves a **tombstone** — a tiny marker under `refs/mess-tombstones/<name>` recording that (and when) the deletion happened. Crucially, the tombstone commit is *not* parented on the deleted chain, so it keeps nothing alive: `--prune` still purges every version.
+
+Sync then works on a **newest-event-wins** rule, comparing the tombstone's timestamp with snapshot timestamps:
+
+- Your `push` deletes the history on the remote and publishes the tombstone.
+- A peer's `pull` sees the tombstone, deletes their local history (their working file is left on disk), and keeps the tombstone.
+- If someone snapshotted *after* the deletion, their version is newer than the tombstone — it wins, and the history revives everywhere as it propagates.
+- Snapshotting a tombstoned name locally revives it explicitly (the tombstone is removed, and your push revives it for everyone).
+
+Tombstones are invisible to `list` and cost a few hundred bytes each. Remember the retention caveats from [What the remote keeps](#what-the-remote-keeps--and-what-it-doesnt) still apply: deletion propagates the *intent* everywhere, but each store's content is only physically gone after its own gc.
+
+## Pushing and pulling (plumbing)
+
+Under the hood, `push`/`pull` are ordinary git transfers of the `refs/mess/*` and `refs/mess-tombstones/*` namespaces — a mess history is just a chain of commits under a ref, so it moves to and from any git repository: another bare store, a machine over SSH, or a hosted remote. Everything below works directly against the store if you ever need manual control.
 
 The key property: **mess histories never move unless you name them explicitly.** A default `git push` only considers branches, and the store has none — so a mess can't leak into a push by accident. Transferring one always requires spelling out the `refs/mess/` refspec.
 
