@@ -308,6 +308,53 @@ func TestStaleTombstoneLosesToNewerRemote(t *testing.T) {
 	}
 }
 
+func TestMovePropagatesWithoutResurrection(t *testing.T) {
+	hub, alice, bob, aliceDir, bobDir := twoUserSetup(t)
+
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	chdir(t, aliceDir)
+	if err := alice.Move("shared.txt", "renamed.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	// hub: old name gone, new name present
+	out, _ := RunGit("", "--git-dir", hub, "for-each-ref", "--format=%(refname)", "refs/mess/")
+	if strings.Contains(out, "refs/mess/shared.txt") {
+		t.Errorf("old name survived on hub:\n%s", out)
+	}
+	if !strings.Contains(out, "refs/mess/renamed.txt") {
+		t.Errorf("new name missing on hub:\n%s", out)
+	}
+
+	// bob pulls: old history deleted, new one adopted with full chain
+	var buf bytes.Buffer
+	if err := bob.Pull(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bob.RevParse("refs/mess/shared.txt"); ok {
+		t.Error("old name resurrected on bob's side")
+	}
+	if _, ok := bob.RevParse("refs/mess/renamed.txt"); !ok {
+		t.Fatal("renamed history not adopted")
+	}
+	chdir(t, bobDir) // name resolution is cwd-relative
+	mustLogCount(t, bob, "renamed.txt", 2) // initial + move commit
+	if read(t, bobDir+"/renamed.txt") != "l1\nl2\nl3\nl4\nl5\n" {
+		t.Error("renamed file not materialized for bob")
+	}
+
+	// alice's next pull must NOT bring the old name back
+	buf.Reset()
+	if err := alice.Pull(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := alice.RevParse("refs/mess/shared.txt"); ok {
+		t.Errorf("old name resurrected on alice's side:\n%s", buf.String())
+	}
+}
+
 func TestListRemote(t *testing.T) {
 	hub, alice, _, aliceDir, _ := twoUserSetup(t)
 

@@ -640,6 +640,25 @@ func (s *Store) Move(oldName, newName string, out io.Writer) error {
 	if _, err := s.Git("update-ref", "-d", oldRef); err != nil {
 		return err
 	}
+	// tombstone the old name, or a sync would resurrect it (and duplicate
+	// the history) on every peer; the chain itself lives on under newRef
+	empty, err := s.EmptyTree()
+	if err != nil {
+		return err
+	}
+	ts, err := s.Git("commit-tree", empty, "-m",
+		fmt.Sprintf("tombstone: %s (moved to %s)", ShortName(oldRef), ShortName(newRef)))
+	if err != nil {
+		return err
+	}
+	if _, err := s.Git("update-ref", "refs/mess-tombstones/"+ShortName(oldRef), ts); err != nil {
+		return err
+	}
+	// and moving onto a previously deleted name revives it
+	if _, ok := s.RevParse("refs/mess-tombstones/" + ShortName(newRef)); ok {
+		s.Git("update-ref", "-d", "refs/mess-tombstones/"+ShortName(newRef))
+		fmt.Fprintf(out, "note: reviving previously deleted history %s\n", ShortName(newRef))
+	}
 	if didMove {
 		fmt.Fprintf(out, "moved file: %s -> %s\n", src, newName)
 	}

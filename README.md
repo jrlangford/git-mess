@@ -304,6 +304,7 @@ Sync then works on a **newest-event-wins** rule, comparing the tombstone's times
 - A peer's `pull` sees the tombstone, deletes their local history (their working file is left on disk), and keeps the tombstone.
 - If someone snapshotted *after* the deletion, their version is newer than the tombstone — it wins, and the history revives everywhere as it propagates.
 - Snapshotting a tombstoned name locally revives it explicitly (the tombstone is removed, and your push revives it for everyone).
+- `move` tombstones the **old name** for the same reason — otherwise a synced rename would resurrect and duplicate the history under its old name on every peer. The chain itself is untouched: it lives on in full under the new name.
 
 Tombstones are invisible to `list` and cost a few hundred bytes each. Remember the retention caveats from [What the remote keeps](#what-the-remote-keeps--and-what-it-doesnt) still apply: deletion propagates the *intent* everywhere, but each store's content is only physically gone after its own gc.
 

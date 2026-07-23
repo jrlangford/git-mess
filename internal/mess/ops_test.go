@@ -258,6 +258,41 @@ func TestMoveLabelOnlyKeepsFiles(t *testing.T) {
 	mustLogCount(t, s, "relabelled", 1) // no move commit for label renames
 }
 
+func TestMoveLeavesTombstoneForOldName(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/orig.txt", "x\n")
+	snap(t, s, SnapshotOpts{}, "orig.txt")
+
+	if err := s.Move("orig.txt", "new.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.RevParse("refs/mess-tombstones/orig.txt"); !ok {
+		t.Error("move must tombstone the old name")
+	}
+	if _, ok := s.RevParse("refs/mess-tombstones/new.txt"); ok {
+		t.Error("new name must not be tombstoned")
+	}
+}
+
+func TestMoveOntoDeletedNameRevives(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/dead.txt", "d\n")
+	snap(t, s, SnapshotOpts{}, "dead.txt")
+	if err := s.Delete("dead.txt", false, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(dir + "/dead.txt")
+
+	write(t, dir+"/live.txt", "l\n")
+	snap(t, s, SnapshotOpts{}, "live.txt")
+	if err := s.Move("live.txt", "dead.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.RevParse("refs/mess-tombstones/dead.txt"); ok {
+		t.Error("moving onto a deleted name must drop its tombstone")
+	}
+}
+
 func TestDeleteTombstoneAndRevive(t *testing.T) {
 	s, dir := newLocalMess(t)
 	write(t, dir+"/tmp.txt", "x\n")
