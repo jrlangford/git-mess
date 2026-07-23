@@ -285,6 +285,8 @@ git mess fetch <hub>           # download remote state + preview; changes nothin
 git mess pull <hub>            # fetch; fast-forward or 3-way merge each history
 ```
 
+Remotes are named the git way: `git mess remote add origin <hub>` stores the URL in your mess (as ordinary git remote config), after which `push`/`fetch`/`pull` need no remote argument at all — they default to `origin`. `git mess clone` sets `origin` automatically, so a cloned mess syncs bare-handed from the start. `git mess remote` lists what's configured; `remote remove <name>` drops one. Any command also still accepts an explicit remote name, path, or URL.
+
 `fetch` is the look-before-you-leap step: it downloads the remote's refs into a local staging namespace (`refs/mess-fetched/`) and prints, per history, exactly what `pull` would do — `remote ahead (pull will fast-forward)`, `diverged (pull will merge)`, `deleted on remote (pull will delete locally)`, and so on — without moving a single local ref or file. The preview can't lie: it runs the very same classification code `pull` acts on. The fetched copy also persists in your store, so you hold the remote's chains locally (inspectable with plain git against `refs/mess-fetched/*`) even before deciding to pull.
 
 `pull` handles each history independently:

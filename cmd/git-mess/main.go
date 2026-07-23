@@ -31,10 +31,14 @@ const usage = `usage: git mess <command> [args]
                                                   on disk, move the file too
   delete <name> [--prune]                         drop a history (--prune: gc now);
                                                   leaves a tombstone so peers delete too
-  push <remote> [<name>]                          publish histories, tombstones, deletions
-  fetch <remote> [<name>]                         download remote state and preview what
+  remote [add <name> <url> | remove <name>]       manage named remotes; no args lists them
+  push [<remote> [<name>]]                        publish histories, tombstones, deletions
+  fetch [<remote> [<name>]]                       download remote state and preview what
                                                   pull would do — changes nothing local
-  pull <remote> [<name>]                          fetch + fast-forward or 3-way merge
+  pull [<remote> [<name>]]                        fetch + fast-forward or 3-way merge
+
+push/fetch/pull default to the remote named 'origin' when none is given
+(clone sets origin automatically).
   hub-init <path>                                 create a shared fast-forward-only store
 `
 
@@ -161,20 +165,13 @@ func main() {
 		}
 		err = s.Delete(name, prune, out)
 	case "push":
-		if len(args) < 1 {
-			usageExit()
-		}
-		err = s.Push(args[0], arg(args, 1), out, errOut)
+		err = s.Push(arg(args, 0), arg(args, 1), out, errOut)
 	case "fetch":
-		if len(args) < 1 {
-			usageExit()
-		}
-		err = s.Fetch(args[0], arg(args, 1), out)
+		err = s.Fetch(arg(args, 0), arg(args, 1), out)
 	case "pull":
-		if len(args) < 1 {
-			usageExit()
-		}
-		err = s.Pull(args[0], arg(args, 1), out)
+		err = s.Pull(arg(args, 0), arg(args, 1), out)
+	case "remote":
+		err = s.Remote(args, out)
 	case "hub-init":
 		if len(args) < 1 {
 			usageExit()

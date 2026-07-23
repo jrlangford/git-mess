@@ -10,6 +10,54 @@ import (
 	"strings"
 )
 
+// Remote manages named remotes, stored as ordinary git remote config in
+// the store. No args lists them; "add <name> <url>" and "remove <name>"
+// modify them.
+func (s *Store) Remote(args []string, out io.Writer) error {
+	if err := s.Ensure(); err != nil {
+		return err
+	}
+	switch {
+	case len(args) == 0:
+		res, err := s.Git("remote", "-v")
+		if err != nil {
+			return err
+		}
+		if res != "" {
+			fmt.Fprintln(out, res)
+		}
+		return nil
+	case args[0] == "add" && len(args) == 3:
+		if _, err := s.Git("remote", "add", args[1], args[2]); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "remote added: %s -> %s\n", args[1], args[2])
+		return nil
+	case (args[0] == "remove" || args[0] == "rm") && len(args) == 2:
+		if _, err := s.Git("remote", "remove", args[1]); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "remote removed: %s\n", args[1])
+		return nil
+	default:
+		return fmt.Errorf("usage: git mess remote [add <name> <url> | remove <name>]")
+	}
+}
+
+// defaultRemote resolves an empty remote argument to "origin" if configured.
+func (s *Store) defaultRemote(remote string) (string, error) {
+	if remote != "" {
+		return remote, nil
+	}
+	res, _ := s.Git("remote")
+	for _, r := range strings.Split(res, "\n") {
+		if r == "origin" {
+			return "origin", nil
+		}
+	}
+	return "", fmt.Errorf("git-mess: no remote given and no 'origin' configured — git mess remote add origin <url>")
+}
+
 // HubInit creates a shared store: an ordinary bare repository configured
 // fast-forward-only (rewrites denied) with ref deletions allowed, so
 // tombstoned deletes can propagate.
@@ -61,6 +109,9 @@ func Clone(url, dir string, out io.Writer) (*Store, error) {
 		"refs/mess/*:refs/mess/*", "refs/mess-tombstones/*:refs/mess-tombstones/*"); err != nil {
 		return nil, err
 	}
+	if _, err := s.Git("remote", "add", "origin", url); err != nil {
+		return nil, err
+	}
 	count := 0
 	for _, ref := range s.ForEachRef("refs/mess") {
 		if err := s.RestoreRef(ref, ref, out); err != nil {
@@ -77,6 +128,10 @@ func Clone(url, dir string, out io.Writer) (*Store, error) {
 func (s *Store) Push(remote, only string, out, errOut io.Writer) error {
 	if err := s.Ensure(); err != nil {
 		return err
+	}
+	var rerr error
+	if remote, rerr = s.defaultRemote(remote); rerr != nil {
+		return rerr
 	}
 	var specs []string
 	if only != "" {
@@ -133,6 +188,10 @@ func (s *Store) Push(remote, only string, out, errOut io.Writer) error {
 func (s *Store) Pull(remote, only string, out io.Writer) error {
 	if err := s.Ensure(); err != nil {
 		return err
+	}
+	var rerr error
+	if remote, rerr = s.defaultRemote(remote); rerr != nil {
+		return rerr
 	}
 	if only != "" {
 		ref, err := s.NameToRef(only)
@@ -300,6 +359,10 @@ func (s *Store) pullOne(name string, out io.Writer) error {
 func (s *Store) Fetch(remote, only string, out io.Writer) error {
 	if err := s.Ensure(); err != nil {
 		return err
+	}
+	var rerr error
+	if remote, rerr = s.defaultRemote(remote); rerr != nil {
+		return rerr
 	}
 	if only != "" {
 		ref, err := s.NameToRef(only)

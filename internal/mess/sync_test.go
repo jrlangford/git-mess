@@ -355,6 +355,75 @@ func TestMovePropagatesWithoutResurrection(t *testing.T) {
 	}
 }
 
+func TestRemoteManagement(t *testing.T) {
+	s, _ := newLocalMess(t)
+	if err := s.Remote([]string{"add", "backup", "/tmp/somewhere.git"}, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := s.Remote(nil, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "backup") || !strings.Contains(buf.String(), "/tmp/somewhere.git") {
+		t.Errorf("remote not listed:\n%s", buf.String())
+	}
+	if err := s.Remote([]string{"remove", "backup"}, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	s.Remote(nil, &buf)
+	if strings.Contains(buf.String(), "backup") {
+		t.Errorf("remote not removed:\n%s", buf.String())
+	}
+}
+
+func TestDefaultRemoteOrigin(t *testing.T) {
+	hub, alice, _, _, _ := twoUserSetup(t)
+
+	// no origin configured: empty remote must error with guidance
+	err := alice.Push("", "", testWriter(t), testWriter(t))
+	if err == nil || !strings.Contains(err.Error(), "origin") {
+		t.Fatalf("want origin guidance, got %v", err)
+	}
+
+	if err := alice.Remote([]string{"add", "origin", hub}, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Push("", "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatalf("push with default origin: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := alice.Fetch("", "", &buf); err != nil {
+		t.Fatalf("fetch with default origin: %v", err)
+	}
+	if err := alice.Pull("", "", &buf); err != nil {
+		t.Fatalf("pull with default origin: %v", err)
+	}
+}
+
+func TestCloneSetsOrigin(t *testing.T) {
+	hub, alice, bob, aliceDir, _ := twoUserSetup(t)
+
+	url, err := bob.Git("remote", "get-url", "origin")
+	if err != nil || url != hub {
+		t.Fatalf("clone should set origin to %s, got %q (%v)", hub, url, err)
+	}
+	// bob can sync with no remote argument at all
+	write(t, aliceDir+"/shared.txt", "l1 A\nl2\nl3\nl4\nl5\n")
+	chdir(t, aliceDir)
+	snap(t, alice, SnapshotOpts{}, "shared.txt")
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := bob.Pull("", "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "fast-forward") {
+		t.Errorf("default-origin pull failed:\n%s", buf.String())
+	}
+}
+
 func TestFetchPreviewsWithoutMutating(t *testing.T) {
 	hub, alice, bob, aliceDir, bobDir := twoUserSetup(t)
 
