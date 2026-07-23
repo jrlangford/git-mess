@@ -308,6 +308,69 @@ func TestStaleTombstoneLosesToNewerRemote(t *testing.T) {
 	}
 }
 
+func TestListRemote(t *testing.T) {
+	hub, alice, _, aliceDir, _ := twoUserSetup(t)
+
+	write(t, aliceDir+"/second.txt", "s\n")
+	chdir(t, aliceDir)
+	snap(t, alice, SnapshotOpts{}, "second.txt")
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := alice.List(hub, &buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"shared.txt  [", "second.txt  ["} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in remote list:\n%s", want, out)
+		}
+	}
+	// the listed sha must be the remote tip, abbreviated
+	tip, _ := alice.Git("rev-parse", "refs/mess/shared.txt")
+	if !strings.Contains(out, "["+tip[:7]+"]") {
+		t.Errorf("want tip %s in:\n%s", tip[:7], out)
+	}
+
+	// delete one history: remote list must mark it deleted
+	if err := alice.Delete("second.txt", true, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	if err := alice.List(hub, &buf); err != nil {
+		t.Fatal(err)
+	}
+	out = buf.String()
+	if !strings.Contains(out, "second.txt  (deleted)") {
+		t.Errorf("want '(deleted)' marker:\n%s", out)
+	}
+	if strings.Contains(out, "second.txt  [") {
+		t.Errorf("deleted history must not list a tip:\n%s", out)
+	}
+	if !strings.Contains(out, "shared.txt  [") {
+		t.Errorf("live history lost from listing:\n%s", out)
+	}
+}
+
+func TestListLocalUnaffectedByRemoteArg(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/only.txt", "x\n")
+	snap(t, s, SnapshotOpts{}, "only.txt")
+
+	var buf bytes.Buffer
+	if err := s.List("", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "only.txt") {
+		t.Errorf("local list broken:\n%s", buf.String())
+	}
+}
+
 func TestPushSingleHistory(t *testing.T) {
 	hub, alice, _, aliceDir, _ := twoUserSetup(t)
 

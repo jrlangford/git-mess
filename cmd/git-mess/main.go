@@ -17,7 +17,8 @@ const usage = `usage: git mess <command> [args]
   snapshot <file>... [-n <name>] [-m <msg>] [-f]  record a new version (-f: allow a file
                                                   already tracked by another history)
   snapshot --all [-m <msg>]                       re-snapshot every changed history
-  list                                            list all histories
+  list [<remote>]                                 list all histories; with a remote, list
+                                                  its names (no fetch), marking deleted ones
   status [<name>...]                              disk vs last snapshot (all if no name)
   untracked [<dir>]                               files no history tracks (default: store
                                                   root, or cwd for the global store)
@@ -102,7 +103,7 @@ func main() {
 			err = s.Snapshot(files, o, out)
 		}
 	case "list":
-		err = s.List(out)
+		err = s.List(arg(args, 0), out)
 	case "status":
 		err = s.Status(args, out)
 	case "untracked":

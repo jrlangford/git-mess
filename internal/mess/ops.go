@@ -231,10 +231,15 @@ func (s *Store) SnapshotAll(msg string, out io.Writer) error {
 	return nil
 }
 
-// List prints every history with tip and age.
-func (s *Store) List(out io.Writer) error {
+// List prints every history with tip and age. With a remote, it lists the
+// remote's names instead — without fetching anything — marking tombstoned
+// (deleted) ones.
+func (s *Store) List(remote string, out io.Writer) error {
 	if err := s.Ensure(); err != nil {
 		return err
+	}
+	if remote != "" {
+		return s.listRemote(remote, out)
 	}
 	res, err := s.Git("for-each-ref", "refs/mess/",
 		"--format=%(refname:lstrip=2)  [%(objectname:short)]  %(creatordate:relative)")
@@ -243,6 +248,55 @@ func (s *Store) List(out io.Writer) error {
 	}
 	if res != "" {
 		fmt.Fprintln(out, res)
+	}
+	return nil
+}
+
+func (s *Store) listRemote(remote string, out io.Writer) error {
+	lsr, err := s.Git("ls-remote", remote, "refs/mess/*", "refs/mess-tombstones/*")
+	if err != nil {
+		return err
+	}
+	histories := map[string]string{} // name -> sha
+	tombstones := map[string]bool{}
+	var order []string
+	for _, line := range strings.Split(lsr, "\n") {
+		sha, ref, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(ref, "refs/mess-tombstones/"):
+			tombstones[strings.TrimPrefix(ref, "refs/mess-tombstones/")] = true
+		case strings.HasPrefix(ref, "refs/mess/"):
+			name := ShortName(ref)
+			if _, seen := histories[name]; !seen {
+				order = append(order, name)
+			}
+			histories[name] = sha
+		}
+	}
+	for _, name := range order {
+		sha := histories[name]
+		if len(sha) > 7 {
+			sha = sha[:7]
+		}
+		line := fmt.Sprintf("%s  [%s]", name, sha)
+		if tombstones[name] {
+			line += "  (tombstone pending)"
+		}
+		fmt.Fprintln(out, line)
+	}
+	// names that exist only as tombstones: deleted on the remote
+	deleted := make([]string, 0, len(tombstones))
+	for name := range tombstones {
+		if _, ok := histories[name]; !ok {
+			deleted = append(deleted, name)
+		}
+	}
+	sort.Strings(deleted)
+	for _, name := range deleted {
+		fmt.Fprintf(out, "%s  (deleted)\n", name)
 	}
 	return nil
 }

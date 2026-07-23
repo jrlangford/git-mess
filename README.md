@@ -119,6 +119,16 @@ Users/jrobin/Documents/notes.txt  [c01a4d1]  2 minutes ago
 my-configs                        [a5ef631]  10 seconds ago
 ```
 
+Pass a remote to list what *it* has — a directory listing of the remote's names, without fetching anything:
+
+```bash
+$ git mess list <hub>
+shared.txt  [a8d9cb6]
+old.txt     (deleted)
+```
+
+Names whose deletion has propagated to the remote show `(deleted)`; a name with both a live tip and a not-yet-applied tombstone shows `(tombstone pending)`.
+
 ### status — disk vs. last snapshot
 
 ```bash
