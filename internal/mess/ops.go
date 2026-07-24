@@ -472,6 +472,70 @@ func contains(list []string, s string) bool {
 	return false
 }
 
+// Grep searches file content across histories — no working tree involved;
+// git grep runs directly over tree objects. By default it searches the
+// latest version of every active history (or just the named ones);
+// archived=true searches the archive instead; history=true searches EVERY
+// recorded version, labeling matches with the version they were found in.
+func (s *Store) Grep(pattern string, names []string, archived, history bool, out io.Writer) error {
+	if err := s.Ensure(); err != nil {
+		return err
+	}
+	prefix := "refs/mess/"
+	if archived {
+		prefix = "refs/mess-archive/"
+	}
+	var refs []string
+	if len(names) > 0 {
+		for _, n := range names {
+			r, err := s.NameToRef(n)
+			if err != nil {
+				return err
+			}
+			ref := prefix + ShortName(r)
+			if _, ok := s.RevParse(ref); !ok {
+				return fmt.Errorf("git-mess: no history: %s", n)
+			}
+			refs = append(refs, ref)
+		}
+	} else {
+		refs = s.ForEachRef(strings.TrimSuffix(prefix, "/"))
+	}
+	for _, ref := range refs {
+		short := strings.TrimPrefix(ref, prefix)
+		revs := []string{ref}
+		if history {
+			list, err := s.Git("rev-list", ref)
+			if err != nil {
+				return err
+			}
+			revs = strings.Split(list, "\n")
+		}
+		res, err := s.GitAllowExit1(append([]string{"grep", "-n", "-e", pattern}, revs...)...)
+		if err != nil {
+			return err
+		}
+		if res == "" {
+			continue
+		}
+		for _, line := range strings.Split(res, "\n") {
+			rev, rest, ok := strings.Cut(line, ":")
+			if !ok {
+				continue
+			}
+			if history {
+				if len(rev) > 7 {
+					rev = rev[:7]
+				}
+				fmt.Fprintf(out, "%s@%s:%s\n", short, rev, rest)
+			} else {
+				fmt.Fprintf(out, "%s:%s\n", short, rest)
+			}
+		}
+	}
+	return nil
+}
+
 // DiffOpts modify Diff behavior.
 type DiffOpts struct {
 	Name string // empty = whole mess

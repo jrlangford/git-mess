@@ -135,6 +135,22 @@ func gitErr(args []string, err error, stderr string) error {
 	return fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 }
 
+// GitAllowExit1 is Git for commands where exit status 1 means "no results"
+// rather than failure (grep, diff --quiet): it returns empty output, no error.
+func (s *Store) GitAllowExit1(args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"--git-dir", s.GitDir}, args...)...)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 && errb.Len() == 0 {
+			return "", nil
+		}
+		return "", gitErr(args, err, errb.String())
+	}
+	return strings.TrimRight(out.String(), "\n"), nil
+}
+
 // RevParse resolves a revision, reporting whether it exists.
 func (s *Store) RevParse(rev string) (string, bool) {
 	out, err := s.Git("rev-parse", "-q", "--verify", rev)

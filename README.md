@@ -65,6 +65,7 @@ git mess snapshot --all [-m <message>]
 git mess list [<remote>] [--archived]
 git mess status [<name>...]
 git mess untracked [<dir>]
+git mess grep <pattern> [<name>...] [--history] [--archived]
 git mess log <name>
 git mess show <name> [<rev>] [<path>]
 git mess diff [<name>] [<rev1> [<rev2>]] [--disk]
@@ -161,6 +162,20 @@ It scans a directory tree — by default the store root for a local mess, or the
 Pipe it into `snapshot` to adopt strays: `git mess untracked | xargs -I{} git mess snapshot {}`.
 
 Performance: the scan is a single in-process directory walk with one hash-set lookup per file, so cost is dominated by walking the tree itself, not by how many files or histories there are. For a huge tree, bound the scan by passing a subdirectory.
+
+### grep — search content across the mess
+
+`git grep` works on tree objects, no working tree required — so a mess is fully searchable:
+
+```bash
+$ git mess grep "secret"                 # latest version of every history
+my-configs:config.ini:1:secret=hunter3
+
+$ git mess grep "hunter2" --history      # EVERY version ever recorded
+my-configs@a5ef631:config.ini:1:secret=hunter2
+```
+
+Matches are labeled `name:path:line` (or `name@version:...` with `--history`, which answers "did any version ever contain this?" — old versions included, exactly what plain grep on the working files can't see). Pass names to restrict the search, and `--archived` to search the archive instead of active histories. Zero matches prints nothing and succeeds, grep-style. Patterns are `git grep` regexes.
 
 ### log — see a history's versions
 

@@ -291,6 +291,96 @@ func TestMoveOntoDeletedNameRevives(t *testing.T) {
 	}
 }
 
+func TestGrepTips(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/a.txt", "the needle is here\n")
+	write(t, dir+"/b.txt", "nothing to see\n")
+	snap(t, s, SnapshotOpts{}, "a.txt")
+	snap(t, s, SnapshotOpts{}, "b.txt")
+
+	var buf bytes.Buffer
+	if err := s.Grep("needle", nil, false, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "a.txt:a.txt:1:the needle is here") {
+		t.Errorf("match missing or mislabeled:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "b.txt") {
+		t.Errorf("false positive:\n%s", buf.String())
+	}
+
+	// zero matches is silent success, not an error
+	buf.Reset()
+	if err := s.Grep("absent-pattern", nil, false, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "" {
+		t.Errorf("want empty output, got:\n%s", buf.String())
+	}
+}
+
+func TestGrepHistoryFindsOldVersions(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/f.txt", "password=hunter2\n")
+	snap(t, s, SnapshotOpts{}, "f.txt")
+	write(t, dir+"/f.txt", "password=REDACTED\n")
+	snap(t, s, SnapshotOpts{}, "f.txt")
+
+	// tip search: gone
+	var buf bytes.Buffer
+	if err := s.Grep("hunter2", nil, false, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "" {
+		t.Errorf("tip search should miss old content:\n%s", buf.String())
+	}
+	// history search: found, labeled with its version
+	if err := s.Grep("hunter2", nil, false, true, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "f.txt@") || !strings.Contains(buf.String(), "hunter2") {
+		t.Errorf("history search missed old version:\n%s", buf.String())
+	}
+}
+
+func TestGrepArchivedAndNamed(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/keep.txt", "marker alpha\n")
+	write(t, dir+"/shelve.txt", "marker beta\n")
+	snap(t, s, SnapshotOpts{}, "keep.txt")
+	snap(t, s, SnapshotOpts{}, "shelve.txt")
+	if err := s.Archive("shelve.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := s.Grep("marker", nil, false, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "beta") {
+		t.Errorf("active grep must not see the archive:\n%s", buf.String())
+	}
+	buf.Reset()
+	if err := s.Grep("marker", nil, true, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "beta") || strings.Contains(buf.String(), "alpha") {
+		t.Errorf("--archived should see only the archive:\n%s", buf.String())
+	}
+
+	// named subset restricts the search
+	buf.Reset()
+	if err := s.Grep("marker", []string{"keep.txt"}, false, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "alpha") {
+		t.Errorf("named grep missed its target:\n%s", buf.String())
+	}
+	if err := s.Grep("marker", []string{"absent"}, false, false, &buf); err == nil {
+		t.Error("grep of unknown history should error")
+	}
+}
+
 func TestArchiveLifecycle(t *testing.T) {
 	s, dir := newLocalMess(t)
 	write(t, dir+"/f.txt", "content\n")

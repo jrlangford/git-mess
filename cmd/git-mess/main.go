@@ -23,6 +23,9 @@ const usage = `usage: git mess <command> [args]
   status [<name>...]                              disk vs last snapshot (all if no name)
   untracked [<dir>]                               files no history tracks (default: store
                                                   root, or cwd for the global store)
+  grep <pattern> [<name>...] [--history]          search content in latest versions;
+                                                  --history: every version ever recorded;
+                                                  --archived: search the archive instead
   log <name>                                      show a history's versions
   show <name> [<rev>] [<path>]                    print file content at a version
   diff [<name>] [<rev1> [<rev2>]] [--disk]        diff versions (default: last change);
@@ -137,6 +140,28 @@ func main() {
 		err = s.Status(args, out)
 	case "untracked":
 		err = s.Untracked(arg(args, 0), out)
+	case "grep":
+		var pattern string
+		var names []string
+		grepArchived, grepHistory := false, false
+		for _, a := range args {
+			switch a {
+			case "--archived":
+				grepArchived = true
+			case "--history":
+				grepHistory = true
+			default:
+				if pattern == "" {
+					pattern = a
+				} else {
+					names = append(names, a)
+				}
+			}
+		}
+		if pattern == "" {
+			usageExit()
+		}
+		err = s.Grep(pattern, names, grepArchived, grepHistory, out)
 	case "log":
 		if len(args) < 1 {
 			usageExit()
