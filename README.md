@@ -1,6 +1,6 @@
 # git-mess
 
-Version files without the ceremony of a git repository — no working tree, no staging area, no branches, no need to decide up front what belongs together. Create a *mess* wherever you have files worth keeping history for: one per directory, as many as you like, each fully independent. And when you're done with a file, delete its entire history in one command, without rewriting anything.
+Version files without the ceremony of a git repository — no working tree, no staging area, no branches, no need to decide up front what belongs together. Create a *mess* wherever you have files worth keeping history for: one per directory, as many as you like, each fully independent. And when you're done with a file, retire it — and, when you really mean it, delete its entire history — without rewriting anything.
 
 > *"We've got a mess here."*
 
@@ -61,18 +61,22 @@ git mess init [<dir>]
 git mess store
 git mess clone <url> [<dir>]
 git mess snapshot <file>... [-n <name>] [-m <message>] [-f]
-git mess list
+git mess snapshot --all [-m <message>]
+git mess list [<remote>] [--archived]
 git mess status [<name>...]
+git mess untracked [<dir>]
 git mess log <name>
 git mess show <name> [<rev>] [<path>]
-git mess diff <name> [<rev1> [<rev2>]]
+git mess diff [<name>] [<rev1> [<rev2>]] [--disk]
 git mess restore <name>|--all [<rev>]
 git mess move <old-name> <new-name>
 git mess archive <name>
 git mess unarchive <name>
 git mess delete <name> [--prune]
-git mess push <remote> [<name>]
-git mess pull <remote> [<name>]
+git mess remote [add <name> <url> | remove <name>]
+git mess push [<remote> [<name>]]
+git mess fetch [<remote> [<name>]]
+git mess pull [<remote> [<name>]]
 git mess hub-init <path>
 ```
 
@@ -129,7 +133,7 @@ shared.txt  [a8d9cb6]
 old.txt     (deleted)
 ```
 
-Names whose deletion has propagated to the remote show `(deleted)`; a name with both a live tip and a not-yet-applied tombstone shows `(tombstone pending)`.
+Names whose deletion has propagated to the remote show `(deleted)`; remotely archived ones show `(archived)`; a name with both a live tip and a not-yet-applied tombstone shows `(tombstone pending)`. Locally, `git mess list --archived` lists your own archive instead of the active histories.
 
 ### status — disk vs. last snapshot
 
@@ -156,7 +160,7 @@ It scans a directory tree — by default the store root for a local mess, or the
 
 Pipe it into `snapshot` to adopt strays: `git mess untracked | xargs -I{} git mess snapshot {}`.
 
-Performance: the scan is a single `find` streamed through a single `awk` set-lookup, so cost is dominated by walking the directory tree itself, not by how many files or histories there are. For a huge tree, bound the scan by passing a subdirectory. (Files with embedded newlines in their names will confuse the line-based matching — don't do that to yourself.)
+Performance: the scan is a single in-process directory walk with one hash-set lookup per file, so cost is dominated by walking the tree itself, not by how many files or histories there are. For a huge tree, bound the scan by passing a subdirectory.
 
 ### log — see a history's versions
 
@@ -221,7 +225,7 @@ git mess restore notes.txt 5a326c0       # restore an older version
 git mess restore --all                   # restore every history's latest version
 ```
 
-Files are written back to the absolute paths they were snapshotted from, overwriting what's there. Restoring an old version and then snapshotting records the revert as a new version — history is never rewritten, so you can always get back.
+Files are written back to the paths they were snapshotted from — root-relative in a local mess, absolute in the global one — overwriting what's there. Restoring an old version and then snapshotting records the revert as a new version — history is never rewritten, so you can always get back.
 
 ### move — rename a history (and its file)
 
@@ -262,8 +266,8 @@ Snapshots are ordinary git commits, so each one carries an author name, email, a
 # default: your global identity (~/.gitconfig user.name / user.email)
 
 # a separate identity for all mess snapshots — set it once on the store:
-git --git-dir ~/.git-mess.git config user.name  "Jonathan (mess)"
-git --git-dir ~/.git-mess.git config user.email jrobin@example.com
+git --git-dir ~/.git-mess.git config user.name  "You (mess)"
+git --git-dir ~/.git-mess.git config user.email you@example.com
 
 # a one-off identity for a single snapshot:
 GIT_AUTHOR_NAME="Robot Cleanup" GIT_AUTHOR_EMAIL=bot@example.com \
@@ -285,7 +289,7 @@ hub store created: /srv/team-mess.git
 
 The two config lines are `receive.denyNonFastForwards=true` and `receive.denyDeletes=false`. Note these are independent switches: **fast-forward-only does not prevent deletion.** Rewriting a ref (pointing it at a non-descendant) and deleting a ref are separate operations in git, so the hub can refuse rewrites while still letting a tombstoned deletion land — and content is truly purged from the hub whenever a gc runs there.
 
-The daily workflow is two commands:
+The daily workflow is three commands:
 
 ```bash
 git mess push <hub>            # publish local snapshots, tombstones, deletions
@@ -327,7 +331,7 @@ Tombstones are invisible to `list` and cost a few hundred bytes each. Remember t
 
 ## Pushing and pulling (plumbing)
 
-Under the hood, `push`/`pull` are ordinary git transfers of the `refs/mess/*` and `refs/mess-tombstones/*` namespaces — a mess history is just a chain of commits under a ref, so it moves to and from any git repository: another bare store, a machine over SSH, or a hosted remote. Everything below works directly against the store if you ever need manual control.
+Under the hood, `push`/`fetch`/`pull` are ordinary git transfers of three namespaces — `refs/mess/*` (active histories), `refs/mess-archive/*` (archived ones), and `refs/mess-tombstones/*` (deletion markers) — a mess history is just a chain of commits under a ref, so it moves to and from any git repository: another bare store, a machine over SSH, or a hosted remote. Everything below works directly against the store if you ever need manual control.
 
 The key property: **mess histories never move unless you name them explicitly.** A default `git push` only considers branches, and the store has none — so a mess can't leak into a push by accident. Transferring one always requires spelling out the `refs/mess/` refspec.
 
@@ -341,7 +345,7 @@ git --git-dir ~/.git-mess.git push <remote> 'refs/mess/<name>:refs/mess/<name>'
 git --git-dir ~/.git-mess.git push <remote> 'refs/mess/*:refs/mess/*'
 ```
 
-`<remote>` is anything git accepts: a path to another bare repo, `user@host:path`, or a URL. For a remote you sync with often, register it in the store once and use its shortname:
+`<remote>` is anything git accepts: a path to another bare repo, `user@host:path`, or a URL. For a remote you sync with often, register it once and use its shortname — `git mess remote add` is porcelain over exactly this:
 
 ```bash
 git --git-dir ~/.git-mess.git remote add backup user@host:mess-backup.git
@@ -374,7 +378,7 @@ It creates `<dir>/.git-mess.git`, fetches all `refs/mess/*`, and restores every 
 
 ### Deleting from a remote
 
-`git mess delete --prune` only purges *your* store. A remote that received the history keeps it until you delete the ref there too — and truly purging its objects requires a gc on that machine:
+In normal use this is automatic: after `archive` + `delete`, your next `git mess push` retires the history's refs on the remote (that's what tombstones are for). But `delete --prune` only purges *your* store's objects — the remote's copy becomes unreachable when the ref deletion lands, and is truly purged only when a gc runs on that machine. The manual plumbing equivalent:
 
 ```bash
 git --git-dir ~/.git-mess.git push <remote> ':refs/mess/<name>'   # delete remote ref
@@ -421,7 +425,7 @@ flowchart LR
     delete["git mess delete --prune"] -. "removes only this chain" .-> h1
 ```
 
-Deleting a history deletes one ref, making its commit chain unreachable; pruning then physically removes those objects. Since no branch ever pointed at these commits, nothing needs rewriting.
+The whole lifecycle is ref bookkeeping: archiving a history moves its ref into `refs/mess-archive/`; deleting removes the ref (leaving a tiny tombstone under `refs/mess-tombstones/`), making the chain unreachable; pruning then physically removes those objects. Since no branch ever pointed at these commits, nothing needs rewriting.
 
 ## Caveats
 
@@ -433,9 +437,11 @@ Deleting a history deletes one ref, making its commit chain unreachable; pruning
 
 ## Uninstall
 
-Everything lives in two places: the script itself, and the store. Remove both and `git-mess` never existed:
+Everything lives in two kinds of places: the installed binary, and the stores. Remove them and `git-mess` never existed:
 
 ```bash
-rm ~/.local/bin/git-mess
-rm -rf ~/.git-mess.git
+rm "$(go env GOPATH)/bin/git-mess"    # the binary go install put on your PATH
+rm -rf ~/.git-mess.git                # the global store
 ```
+
+Local messes are self-contained: delete any directory's `.git-mess.git` to erase its histories (the working files stay). Nothing else is written anywhere — no config files, no caches.
