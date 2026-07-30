@@ -12,6 +12,37 @@ import (
 )
 
 var ErrMergeConflict = errors.New("merge completed with conflicts")
+var ErrPullIncomplete = errors.New("pull incomplete")
+
+// PullIncompleteError reports histories that Pull could not fully reconcile.
+// Other histories are still processed when it is safe to do so.
+type PullIncompleteError struct {
+	Skipped    []string
+	Conflicted []string
+}
+
+func (e *PullIncompleteError) Error() string {
+	var outcomes []string
+	if len(e.Skipped) > 0 {
+		outcomes = append(outcomes, "skipped: "+strings.Join(e.Skipped, ", "))
+	}
+	if len(e.Conflicted) > 0 {
+		outcomes = append(outcomes, "conflicts: "+strings.Join(e.Conflicted, ", "))
+	}
+	return "pull incomplete (" + strings.Join(outcomes, "; ") + ")"
+}
+
+func (e *PullIncompleteError) Unwrap() error {
+	return ErrPullIncomplete
+}
+
+type pullSkippedError struct {
+	name string
+}
+
+func (e *pullSkippedError) Error() string {
+	return "pull skipped: " + e.name
+}
 
 // Remote manages named remotes, stored as ordinary git remote config in
 // the store. No args lists them; "add <name> <url>" and "remove <name>"
@@ -283,13 +314,31 @@ func (s *Store) Pull(remote, only string, out io.Writer) error {
 		sorted = append(sorted, n)
 	}
 	sort.Strings(sorted)
+	var incomplete PullIncompleteError
+	var outcomeErrors []error
 	for _, name := range sorted {
 		if only != "" && name != only {
 			continue
 		}
 		if err := s.pullOne(name, out); err != nil {
-			return err
+			var skipped *pullSkippedError
+			switch {
+			case errors.As(err, &skipped):
+				incomplete.Skipped = append(incomplete.Skipped, skipped.name)
+			case errors.Is(err, ErrMergeConflict):
+				incomplete.Conflicted = append(incomplete.Conflicted, name)
+				outcomeErrors = append(outcomeErrors, err)
+			default:
+				if len(incomplete.Skipped) > 0 || len(incomplete.Conflicted) > 0 {
+					errs := append([]error{&incomplete}, outcomeErrors...)
+					return errors.Join(append(errs, err)...)
+				}
+				return err
+			}
 		}
+	}
+	if len(incomplete.Skipped) > 0 || len(incomplete.Conflicted) > 0 {
+		return errors.Join(append([]error{&incomplete}, outcomeErrors...)...)
 	}
 	return nil
 }
@@ -521,7 +570,7 @@ func (s *Store) pullOne(name string, out io.Writer) error {
 	case stateFastForward:
 		if s.IsDirty(ref) {
 			fmt.Fprintf(out, "%s: SKIPPED — unsnapshotted local changes (snapshot or restore, then pull again)\n", name)
-			return nil
+			return &pullSkippedError{name: name}
 		}
 		if _, err := s.Git("update-ref", ref, rem.Active); err != nil {
 			return err
@@ -534,7 +583,7 @@ func (s *Store) pullOne(name string, out io.Writer) error {
 	default: // stateDiverged
 		if s.IsDirty(ref) {
 			fmt.Fprintf(out, "%s: SKIPPED — unsnapshotted local changes (snapshot or restore, then pull again)\n", name)
-			return nil
+			return &pullSkippedError{name: name}
 		}
 		return s.mergeHistory(name, rem.Active, out)
 	}
