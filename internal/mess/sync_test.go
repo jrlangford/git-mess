@@ -232,8 +232,16 @@ func TestPullSkipsDirtyHistory(t *testing.T) {
 	before, _ := bob.RevParse("refs/mess/shared.txt")
 
 	var buf bytes.Buffer
-	if err := bob.Pull(hub, "", &buf); err != nil {
-		t.Fatal(err)
+	err := bob.Pull(hub, "", &buf)
+	if !errors.Is(err, ErrPullIncomplete) {
+		t.Fatalf("Pull error = %v, want ErrPullIncomplete", err)
+	}
+	var incomplete *PullIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("Pull error type = %T, want *PullIncompleteError", err)
+	}
+	if len(incomplete.Skipped) != 1 || incomplete.Skipped[0] != "shared.txt" {
+		t.Fatalf("skipped histories = %v, want [shared.txt]", incomplete.Skipped)
 	}
 	if !strings.Contains(buf.String(), "SKIPPED") {
 		t.Fatalf("want skip, got:\n%s", buf.String())
@@ -244,6 +252,64 @@ func TestPullSkipsDirtyHistory(t *testing.T) {
 	}
 	if read(t, bobDir+"/shared.txt") != "l1\nl2 uncommitted\nl3\nl4\nl5\n" {
 		t.Error("dirty file must not be touched")
+	}
+}
+
+func TestPullContinuesAfterConflictAndSkip(t *testing.T) {
+	hub, alice, bob, aliceDir, bobDir := twoUserSetup(t)
+
+	for _, name := range []string{"a-conflict", "b-dirty", "c-clean"} {
+		write(t, filepath.Join(aliceDir, name), "base\n")
+		chdir(t, aliceDir)
+		snap(t, alice, SnapshotOpts{}, name)
+	}
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := bob.Pull(hub, "", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"a-conflict", "b-dirty", "c-clean"} {
+		write(t, filepath.Join(aliceDir, name), "remote\n")
+		chdir(t, aliceDir)
+		snap(t, alice, SnapshotOpts{}, name)
+	}
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	write(t, filepath.Join(bobDir, "a-conflict"), "local\n")
+	chdir(t, bobDir)
+	snap(t, bob, SnapshotOpts{}, "a-conflict")
+	write(t, filepath.Join(bobDir, "b-dirty"), "unsnapshotted\n")
+
+	var buf bytes.Buffer
+	err := bob.Pull(hub, "", &buf)
+	if !errors.Is(err, ErrPullIncomplete) {
+		t.Fatalf("Pull error = %v, want ErrPullIncomplete", err)
+	}
+	if !errors.Is(err, ErrMergeConflict) {
+		t.Fatalf("Pull error = %v, want ErrMergeConflict", err)
+	}
+	var incomplete *PullIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("Pull error type = %T, want *PullIncompleteError", err)
+	}
+	if len(incomplete.Conflicted) != 1 || incomplete.Conflicted[0] != "a-conflict" {
+		t.Fatalf("conflicted histories = %v, want [a-conflict]", incomplete.Conflicted)
+	}
+	if len(incomplete.Skipped) != 1 || incomplete.Skipped[0] != "b-dirty" {
+		t.Fatalf("skipped histories = %v, want [b-dirty]", incomplete.Skipped)
+	}
+	if !strings.Contains(read(t, filepath.Join(bobDir, "a-conflict")), "<<<<<<<") {
+		t.Fatal("conflicted history was not recorded and restored with markers")
+	}
+	if got := read(t, filepath.Join(bobDir, "b-dirty")); got != "unsnapshotted\n" {
+		t.Fatalf("dirty history changed: %q", got)
+	}
+	if got := read(t, filepath.Join(bobDir, "c-clean")); got != "remote\n" {
+		t.Fatalf("clean history did not fast-forward after earlier outcomes: %q", got)
 	}
 }
 
