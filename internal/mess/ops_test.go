@@ -149,9 +149,10 @@ func TestStatusReportsValidNamesAlongsideAllResolutionErrors(t *testing.T) {
 	write(t, dir+"/b.txt", "b\n")
 	snap(t, s, SnapshotOpts{}, "a.txt")
 	snap(t, s, SnapshotOpts{}, "b.txt")
+	write(t, dir+"/a.txt", "modified\n")
 
 	var buf bytes.Buffer
-	err := s.Status([]string{"a.txt", "missing-a", "b.txt", "missing-b"}, &buf)
+	err := s.Status([]string{"missing-a", "a.txt", "b.txt", "missing-b"}, &buf)
 	if err == nil {
 		t.Fatal("Status returned nil, want errors for missing names")
 	}
@@ -160,7 +161,7 @@ func TestStatusReportsValidNamesAlongsideAllResolutionErrors(t *testing.T) {
 			t.Errorf("Status error missing %q: %v", name, err)
 		}
 	}
-	for _, name := range []string{"a.txt  (clean)", "b.txt  (clean)"} {
+	for _, name := range []string{"a.txt\n  modified", "b.txt  (clean)"} {
 		if !strings.Contains(buf.String(), name) {
 			t.Errorf("Status output missing %q:\n%s", name, buf.String())
 		}
