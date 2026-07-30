@@ -79,6 +79,8 @@ func main() {
 	out, errOut := os.Stdout, os.Stderr
 
 	switch cmd {
+	case "help", "-h", "--help":
+		fmt.Fprint(out, usage)
 	case "init":
 		err = mess.InitLocal(arg(args, 0), out, errOut)
 	case "store":
