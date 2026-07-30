@@ -201,6 +201,41 @@ func (s *Store) Push(remote, only string, out, errOut io.Writer) error {
 		if hasTomb {
 			specs = append(specs, "refs/mess-tombstones/"+name+":refs/mess-tombstones/"+name)
 		}
+		if hasRef {
+			// A move creates a new active ref plus a tombstone for the old
+			// name. Publishing the new name must carry both halves so peers
+			// never observe two live names for the same history.
+			moveTargets := map[string]bool{name: true}
+			included := map[string]bool{}
+			for {
+				added := false
+				for _, t := range s.ForEachRef("refs/mess-tombstones") {
+					oldName := strings.TrimPrefix(t, "refs/mess-tombstones/")
+					if included[oldName] {
+						continue
+					}
+					tomb, _ := s.RevParse(t)
+					msg, _ := s.Git("log", "-1", "--format=%B", tomb)
+					for target := range moveTargets {
+						want := fmt.Sprintf("tombstone: %s (moved to %s)", oldName, target)
+						if strings.TrimSpace(msg) != want {
+							continue
+						}
+						specs = append(specs, t+":"+t)
+						if canRetire(tomb, "refs/mess/"+oldName) {
+							specs = append(specs, ":refs/mess/"+oldName)
+						}
+						included[oldName] = true
+						moveTargets[oldName] = true
+						added = true
+						break
+					}
+				}
+				if !added {
+					break
+				}
+			}
+		}
 	} else {
 		specs = append(specs,
 			"refs/mess/*:refs/mess/*",
