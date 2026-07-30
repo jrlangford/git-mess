@@ -2,6 +2,7 @@ package mess
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,40 @@ func TestPullFastForward(t *testing.T) {
 	}
 }
 
+func TestPullConflictReturnsErrorAfterRecordingMerge(t *testing.T) {
+	hub, alice, bob, aliceDir, bobDir := twoUserSetup(t)
+
+	write(t, aliceDir+"/shared.txt", "remote edit\nl2\nl3\nl4\nl5\n")
+	chdir(t, aliceDir)
+	snap(t, alice, SnapshotOpts{}, "shared.txt")
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	write(t, bobDir+"/shared.txt", "local edit\nl2\nl3\nl4\nl5\n")
+	chdir(t, bobDir)
+	snap(t, bob, SnapshotOpts{}, "shared.txt")
+
+	before, _ := bob.RevParse("refs/mess/shared.txt")
+	var buf bytes.Buffer
+	err := bob.Pull(hub, "shared.txt", &buf)
+	if !errors.Is(err, ErrMergeConflict) {
+		t.Fatalf("Pull error = %v, want ErrMergeConflict", err)
+	}
+	after, _ := bob.RevParse("refs/mess/shared.txt")
+	if after == before {
+		t.Fatal("conflicted pull did not record a merge commit")
+	}
+	parents, _ := bob.Git("log", "-1", "--format=%P", after)
+	if len(strings.Fields(parents)) != 2 {
+		t.Fatalf("conflicted merge parents = %q, want two parents", parents)
+	}
+	content := read(t, bobDir+"/shared.txt")
+	if !strings.Contains(content, "<<<<<<<") {
+		t.Fatalf("conflict markers were not restored:\n%s", content)
+	}
+}
+
 func TestPushRejectedOnDivergence(t *testing.T) {
 	hub, alice, bob, aliceDir, bobDir := twoUserSetup(t)
 
@@ -168,8 +203,8 @@ func TestDivergedConflictMarkers(t *testing.T) {
 	snap(t, bob, SnapshotOpts{}, "shared.txt")
 
 	var buf bytes.Buffer
-	if err := bob.Pull(hub, "", &buf); err != nil {
-		t.Fatal(err)
+	if err := bob.Pull(hub, "", &buf); !errors.Is(err, ErrMergeConflict) {
+		t.Fatalf("Pull error = %v, want ErrMergeConflict", err)
 	}
 	if !strings.Contains(buf.String(), "CONFLICT") {
 		t.Fatalf("want conflict report, got:\n%s", buf.String())

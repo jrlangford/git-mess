@@ -1,6 +1,7 @@
 package mess
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"sort"
 	"strings"
 )
+
+var ErrMergeConflict = errors.New("merge completed with conflicts")
 
 // Remote manages named remotes, stored as ordinary git remote config in
 // the store. No args lists them; "add <name> <url>" and "remove <name>"
@@ -745,6 +748,7 @@ func (s *Store) mergeHistory(name, remoteSHA string, out io.Writer) error {
 			fmt.Fprintf(out, "    CONFLICT: %s\n", c)
 		}
 		fmt.Fprintln(out, "    markers are in the files AND recorded — edit, then 'git mess snapshot' to resolve")
+		return fmt.Errorf("%w: %s", ErrMergeConflict, name)
 	} else {
 		fmt.Fprintf(out, "%s -> %s  (merged)\n", name, s.Short(commit))
 	}
