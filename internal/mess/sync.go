@@ -32,12 +32,8 @@ func (e *PullIncompleteError) Error() string {
 	return "pull incomplete (" + strings.Join(outcomes, "; ") + ")"
 }
 
-func (e *PullIncompleteError) Unwrap() []error {
-	errs := []error{ErrPullIncomplete}
-	if len(e.Conflicted) > 0 {
-		errs = append(errs, ErrMergeConflict)
-	}
-	return errs
+func (e *PullIncompleteError) Unwrap() error {
+	return ErrPullIncomplete
 }
 
 type pullSkippedError struct {
@@ -319,6 +315,7 @@ func (s *Store) Pull(remote, only string, out io.Writer) error {
 	}
 	sort.Strings(sorted)
 	var incomplete PullIncompleteError
+	var outcomeErrors []error
 	for _, name := range sorted {
 		if only != "" && name != only {
 			continue
@@ -330,16 +327,18 @@ func (s *Store) Pull(remote, only string, out io.Writer) error {
 				incomplete.Skipped = append(incomplete.Skipped, skipped.name)
 			case errors.Is(err, ErrMergeConflict):
 				incomplete.Conflicted = append(incomplete.Conflicted, name)
+				outcomeErrors = append(outcomeErrors, err)
 			default:
 				if len(incomplete.Skipped) > 0 || len(incomplete.Conflicted) > 0 {
-					return errors.Join(&incomplete, err)
+					errs := append([]error{&incomplete}, outcomeErrors...)
+					return errors.Join(append(errs, err)...)
 				}
 				return err
 			}
 		}
 	}
 	if len(incomplete.Skipped) > 0 || len(incomplete.Conflicted) > 0 {
-		return &incomplete
+		return errors.Join(append([]error{&incomplete}, outcomeErrors...)...)
 	}
 	return nil
 }
