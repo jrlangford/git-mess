@@ -1,6 +1,7 @@
 package mess
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -382,11 +383,13 @@ func (s *Store) Status(names []string, out io.Writer) error {
 		return err
 	}
 	var refs []string
+	var nameErrors []error
 	if len(names) > 0 {
 		for _, n := range names {
 			ref, err := s.ResolveRef(n)
 			if err != nil {
-				return err
+				nameErrors = append(nameErrors, err)
+				continue
 			}
 			refs = append(refs, ref)
 		}
@@ -394,13 +397,16 @@ func (s *Store) Status(names []string, out io.Writer) error {
 		refs = s.ForEachRef("refs/mess")
 	}
 	if len(refs) == 0 {
-		fmt.Fprintln(out, "git-mess: no histories")
-		return nil
+		if len(names) == 0 {
+			fmt.Fprintln(out, "git-mess: no histories")
+			return nil
+		}
+		return errors.Join(nameErrors...)
 	}
 	for _, ref := range refs {
 		changes, err := s.statusChanges(ref)
 		if err != nil {
-			return err
+			return errors.Join(append(nameErrors, err)...)
 		}
 		if len(changes) == 0 {
 			fmt.Fprintf(out, "%s  (clean)\n", ShortName(ref))
@@ -411,7 +417,7 @@ func (s *Store) Status(names []string, out io.Writer) error {
 			}
 		}
 	}
-	return nil
+	return errors.Join(nameErrors...)
 }
 
 // Show prints one file's content at a version. rev and path are optional;
