@@ -143,6 +143,30 @@ func TestStatusStates(t *testing.T) {
 	}
 }
 
+func TestStatusReportsValidNamesAlongsideAllResolutionErrors(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/a.txt", "a\n")
+	write(t, dir+"/b.txt", "b\n")
+	snap(t, s, SnapshotOpts{}, "a.txt")
+	snap(t, s, SnapshotOpts{}, "b.txt")
+
+	var buf bytes.Buffer
+	err := s.Status([]string{"a.txt", "missing-a", "b.txt", "missing-b"}, &buf)
+	if err == nil {
+		t.Fatal("Status returned nil, want errors for missing names")
+	}
+	for _, name := range []string{"missing-a", "missing-b"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("Status error missing %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{"a.txt  (clean)", "b.txt  (clean)"} {
+		if !strings.Contains(buf.String(), name) {
+			t.Errorf("Status output missing %q:\n%s", name, buf.String())
+		}
+	}
+}
+
 func TestDiffFirstVersionAgainstNothing(t *testing.T) {
 	s, dir := newLocalMess(t)
 	write(t, dir+"/solo.txt", "only\n")
