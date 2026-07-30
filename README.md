@@ -256,6 +256,8 @@ After this, `log` shows the full chain plus a `move:` entry, `status` is clean, 
 
 If you already moved the file yourself, `move` skips the filesystem step — pass the old name exactly as `git mess list` prints it, then `snapshot` from the new path to record it. Multi-file and `-n`-named histories only ever have their *label* renamed; files stay put. `mv` works as an alias.
 
+When syncing one moved history, push its new name normally: `git mess push <remote> <new-name>` publishes the new ref and its paired old-name tombstone/deletion together. If several local moves happened before that push, the whole pending rename chain is included.
+
 ### archive and delete — the two-step end of life
 
 Removal is deliberately two-phased: **archiving** a history retires it recoverably, and **deleting** — the destructive step — only works on histories already archived, so a history can never go from alive to gone in one slip.

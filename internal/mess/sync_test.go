@@ -483,6 +483,68 @@ func TestMovePropagatesWithoutResurrection(t *testing.T) {
 	}
 }
 
+func TestTargetedPushPublishesBothHalvesOfMove(t *testing.T) {
+	hub, alice, bob, aliceDir, _ := twoUserSetup(t)
+
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	chdir(t, aliceDir)
+	if err := alice.Move("shared.txt", "renamed.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Push(hub, "renamed.txt", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess/renamed.txt"); err != nil {
+		t.Fatal("hub is missing the new history")
+	}
+	if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess/shared.txt"); err == nil {
+		t.Fatal("hub retained the old history after targeted move push")
+	}
+	if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess-tombstones/shared.txt"); err != nil {
+		t.Fatal("hub is missing the old-name tombstone")
+	}
+
+	if err := bob.Pull(hub, "", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bob.RevParse("refs/mess/shared.txt"); ok {
+		t.Fatal("peer retained the old history")
+	}
+	if _, ok := bob.RevParse("refs/mess/renamed.txt"); !ok {
+		t.Fatal("peer did not adopt the renamed history")
+	}
+}
+
+func TestTargetedPushPublishesUnpushedMoveChain(t *testing.T) {
+	hub, alice, _, aliceDir, _ := twoUserSetup(t)
+
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	chdir(t, aliceDir)
+	if err := alice.Move("shared.txt", "intermediate.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-03T00:00:00")
+	if err := alice.Move("intermediate.txt", "final.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.Push(hub, "final.txt", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, oldName := range []string{"shared.txt", "intermediate.txt"} {
+		if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess/"+oldName); err == nil {
+			t.Errorf("hub retained old history %s", oldName)
+		}
+		if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess-tombstones/"+oldName); err != nil {
+			t.Errorf("hub is missing tombstone for %s", oldName)
+		}
+	}
+	if _, err := RunGit("", "--git-dir", hub, "rev-parse", "refs/mess/final.txt"); err != nil {
+		t.Fatal("hub is missing final history")
+	}
+}
+
 func TestRemoteManagement(t *testing.T) {
 	s, _ := newLocalMess(t)
 	if err := s.Remote([]string{"add", "backup", "/tmp/somewhere.git"}, testWriter(t)); err != nil {
