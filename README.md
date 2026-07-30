@@ -242,6 +242,8 @@ git mess restore --all                   # restore every history's latest versio
 
 Files are written back to the paths they were snapshotted from — root-relative in a local mess, absolute in the global one — overwriting what's there. Restoring an old version and then snapshotting records the revert as a new version — history is never rewritten, so you can always get back.
 
+`restore` changes files on disk only; it never advances the history's local ref. This matters after `fetch`: restoring a fetched remote revision by SHA can put the remote version on disk while the local history still points to an older snapshot. `status` then reports unsnapshotted changes, and a following `pull` skips that history rather than overwriting them — even if the disk bytes already match the remote tip. Snapshot the restored bytes to record them, or restore the local tip before pulling.
+
 ### move — rename a history (and its file)
 
 `move` renames a history — and if the history is a single file still sitting at its named path, it moves the actual file too and records the rename as a new version, so disk and history stay in step:
