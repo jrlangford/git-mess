@@ -240,18 +240,25 @@ func (s *Store) SnapshotAll(msg string, out io.Writer) error {
 }
 
 // List prints every active history with tip and age. With archived=true it
-// lists the archive instead. With a remote, it lists the remote's names —
-// without fetching anything — marking archived and deleted ones.
-func (s *Store) List(remote string, archived bool, out io.Writer) error {
+// lists the archive instead; with recovery=true it lists local recovery
+// snapshots. With a remote, it lists the remote's names — without fetching
+// anything — marking archived and deleted ones.
+func (s *Store) List(remote string, archived, recovery bool, out io.Writer) error {
 	if err := s.Ensure(); err != nil {
 		return err
 	}
 	if remote != "" {
+		if recovery {
+			return fmt.Errorf("git-mess: recovery snapshots are local only")
+		}
 		return s.listRemote(remote, out)
 	}
 	ns := "refs/mess/"
 	if archived {
 		ns = "refs/mess-archive/"
+	}
+	if recovery {
+		ns = "refs/mess-recovery/"
 	}
 	res, err := s.Git("for-each-ref", ns,
 		"--format=%(refname:lstrip=2)  [%(objectname:short)]  %(creatordate:relative)")
@@ -677,6 +684,30 @@ func (s *Store) Restore(name, rev string, all bool, out io.Writer) error {
 		}
 		return nil
 	}
+	if recoveryRef, ok := s.ResolveRecoveryRef(name); ok {
+		if rev != "" {
+			return fmt.Errorf("git-mess: recovery identifiers do not take a separate revision")
+		}
+		parentEntries, err := s.TreeEntries(recoveryRef + "~1")
+		if err != nil {
+			return err
+		}
+		recoveryEntries, err := s.TreeEntries(recoveryRef)
+		if err != nil {
+			return err
+		}
+		for path := range parentEntries {
+			if _, present := recoveryEntries[path]; present {
+				continue
+			}
+			dest := s.DiskPath(path)
+			if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			fmt.Fprintf(out, "removed %s @ recovery %s\n", dest, s.Short(recoveryRef))
+		}
+		return s.RestoreRef(recoveryRef, recoveryRef, out)
+	}
 	ref, err := s.ResolveRef(name)
 	if err != nil {
 		return err
@@ -853,6 +884,22 @@ func (s *Store) Unarchive(name string, out io.Writer) error {
 // peers delete it too. Active histories are refused: archive first. With
 // prune, unreachable objects are purged from the store immediately.
 func (s *Store) Delete(name string, prune bool, out io.Writer) error {
+	if recoveryRef, ok := s.ResolveRecoveryRef(name); ok {
+		if !prune {
+			return fmt.Errorf("git-mess: recovery snapshots are retained until explicit prune: git mess delete %s --prune", name)
+		}
+		if _, err := s.Git("update-ref", "-d", recoveryRef); err != nil {
+			return err
+		}
+		if _, err := s.Git("reflog", "expire", "--expire=now", "--all"); err != nil {
+			return err
+		}
+		if _, err := s.Git("gc", "-q", "--prune=now"); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "pruned recovery snapshot: %s\n", name)
+		return nil
+	}
 	ref, err := s.NameToRef(name)
 	if err != nil {
 		return err

@@ -278,6 +278,214 @@ func TestTombstonePropagation(t *testing.T) {
 	}
 }
 
+func TestRemoteTombstonePreservesDirtyDiskRecovery(t *testing.T) {
+	hub, alice, bob, _, bobDir := twoUserSetup(t)
+
+	write(t, bobDir+"/shared.txt", "unsnapshotted local bytes\n")
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	deleteFully(t, alice, "shared.txt", true)
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := bob.Pull(hub, "", &buf); err != nil {
+		t.Fatal(err)
+	}
+	refs := bob.ForEachRef("refs/mess-recovery")
+	if len(refs) != 1 {
+		t.Fatalf("want one recovery ref, got %v", refs)
+	}
+	content, err := bob.GitRaw("show", refs[0]+":shared.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "unsnapshotted local bytes\n" {
+		t.Fatalf("recovery has %q", content)
+	}
+	if _, ok := bob.RevParse(refs[0] + "~1"); !ok {
+		t.Fatal("recovery commit must retain the local history tip as its parent")
+	}
+	if !strings.Contains(buf.String(), "saved dirty disk state as recovery shared.txt/") {
+		t.Fatalf("pull did not report recovery identifier:\n%s", buf.String())
+	}
+
+	buf.Reset()
+	if err := bob.List("", false, true, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), strings.TrimPrefix(refs[0], "refs/mess-recovery/")) {
+		t.Fatalf("recovery is not discoverable:\n%s", buf.String())
+	}
+	if err := bob.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if remoteRecoveries, err := RunGit("", "--git-dir", hub, "for-each-ref", "refs/mess-recovery/"); err != nil || remoteRecoveries != "" {
+		t.Fatalf("local recovery leaked to remote: %q (%v)", remoteRecoveries, err)
+	}
+	id := strings.TrimPrefix(refs[0], "refs/mess-recovery/")
+	write(t, bobDir+"/shared.txt", "overwritten later\n")
+	if err := bob.Restore(id, "", false, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, bobDir+"/shared.txt"); got != "unsnapshotted local bytes\n" {
+		t.Fatalf("restored recovery content = %q", got)
+	}
+	if err := bob.Delete(id, false, testWriter(t)); err == nil || !strings.Contains(err.Error(), "retained until explicit prune") {
+		t.Fatalf("recovery deletion without prune = %v", err)
+	}
+	if _, ok := bob.RevParse(refs[0]); !ok {
+		t.Fatal("recovery disappeared without explicit prune")
+	}
+	if err := bob.Delete(id, true, testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bob.RevParse(refs[0]); ok {
+		t.Fatal("recovery ref remains after explicit prune")
+	}
+}
+
+func TestRemoteTombstoneDoesNotCreateCleanRecovery(t *testing.T) {
+	hub, alice, bob, _, _ := twoUserSetup(t)
+
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	deleteFully(t, alice, "shared.txt", true)
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := bob.Pull(hub, "", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	if refs := bob.ForEachRef("refs/mess-recovery"); len(refs) != 0 {
+		t.Fatalf("clean history created redundant recovery refs: %v", refs)
+	}
+}
+
+func TestRemoteTombstoneRecoveryMirrorsPartialAndAllMissingDisk(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		removeAll bool
+		wantPaths []string
+		wantApp   string
+	}{
+		{name: "partial", wantPaths: []string{"config/app.toml", "config/worker.toml"}, wantApp: "A1\n"},
+		{name: "all-missing", removeAll: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub, alice, bob, aliceDir, bobDir := twoUserSetup(t)
+			for _, file := range []struct{ path, body string }{
+				{"config/app.toml", "A0\n"},
+				{"config/cache.toml", "B0\n"},
+				{"config/worker.toml", "C0\n"},
+			} {
+				write(t, filepath.Join(aliceDir, file.path), file.body)
+			}
+			chdir(t, aliceDir)
+			snap(t, alice, SnapshotOpts{Name: "app-config"},
+				"config/app.toml", "config/cache.toml", "config/worker.toml")
+			if err := alice.Push(hub, "app-config", testWriter(t), testWriter(t)); err != nil {
+				t.Fatal(err)
+			}
+			if err := bob.Pull(hub, "app-config", testWriter(t)); err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.removeAll {
+				for _, p := range []string{"config/app.toml", "config/cache.toml", "config/worker.toml"} {
+					if err := os.Remove(filepath.Join(bobDir, p)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else {
+				write(t, bobDir+"/config/app.toml", "A1\n")
+				if err := os.Remove(bobDir + "/config/cache.toml"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+			deleteFully(t, alice, "app-config", true)
+			if err := alice.Push(hub, "app-config", testWriter(t), testWriter(t)); err != nil {
+				t.Fatal(err)
+			}
+			if err := bob.Pull(hub, "app-config", testWriter(t)); err != nil {
+				t.Fatal(err)
+			}
+
+			refs := bob.ForEachRef("refs/mess-recovery")
+			if len(refs) != 1 {
+				t.Fatalf("want one recovery ref, got %v", refs)
+			}
+			paths, err := bob.TreePaths(refs[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(paths, "\n") != strings.Join(tc.wantPaths, "\n") {
+				t.Fatalf("recovery paths = %v, want %v", paths, tc.wantPaths)
+			}
+			if tc.wantApp != "" {
+				content, err := bob.GitRaw("show", refs[0]+":config/app.toml")
+				if err != nil || string(content) != tc.wantApp {
+					t.Fatalf("recovery app content = %q (%v)", content, err)
+				}
+			}
+
+			// Recovery restore reproduces omissions too, rather than merely
+			// writing the files that remain in the recovery tree.
+			for _, p := range []string{"config/app.toml", "config/cache.toml", "config/worker.toml"} {
+				write(t, filepath.Join(bobDir, p), "later\n")
+			}
+			id := strings.TrimPrefix(refs[0], "refs/mess-recovery/")
+			if err := bob.Restore(id, "", false, testWriter(t)); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range []string{"config/app.toml", "config/cache.toml", "config/worker.toml"} {
+				wantPresent := map[string]bool{
+					"config/app.toml":    !tc.removeAll,
+					"config/worker.toml": !tc.removeAll,
+				}[p]
+				_, err := os.Stat(filepath.Join(bobDir, p))
+				if wantPresent && err != nil {
+					t.Errorf("restore omitted %s: %v", p, err)
+				}
+				if !wantPresent && !os.IsNotExist(err) {
+					t.Errorf("restore should remove %s, stat err = %v", p, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRecoveryInstallFailureAbortsRemoteTombstone(t *testing.T) {
+	hub, alice, bob, _, bobDir := twoUserSetup(t)
+	write(t, bobDir+"/shared.txt", "dirty\n")
+	before, _ := bob.RevParse("refs/mess/shared.txt")
+
+	// Block creation of refs/mess-recovery/shared.txt/<tomb>.
+	blocker := filepath.Join(bob.GitDir, "refs/mess-recovery/shared.txt")
+	if err := os.MkdirAll(filepath.Dir(blocker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, blocker, before+"\n")
+
+	t.Setenv("GIT_COMMITTER_DATE", "2030-01-02T00:00:00")
+	deleteFully(t, alice, "shared.txt", true)
+	if err := alice.Push(hub, "", testWriter(t), testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+	err := bob.Pull(hub, "", testWriter(t))
+	if err == nil || !strings.Contains(err.Error(), "remote tombstone not applied") {
+		t.Fatalf("want fail-closed recovery error, got %v", err)
+	}
+	after, ok := bob.RevParse("refs/mess/shared.txt")
+	if !ok || after != before {
+		t.Fatalf("active ref changed after recovery failure: before %s after %s", before, after)
+	}
+	if _, ok := bob.RevParse("refs/mess-tombstones/shared.txt"); ok {
+		t.Fatal("remote tombstone was applied after recovery failure")
+	}
+}
+
 func TestNewestWinsRevival(t *testing.T) {
 	hub, alice, bob, _, bobDir := twoUserSetup(t)
 
@@ -467,7 +675,7 @@ func TestMovePropagatesWithoutResurrection(t *testing.T) {
 	if _, ok := bob.RevParse("refs/mess/renamed.txt"); !ok {
 		t.Fatal("renamed history not adopted")
 	}
-	chdir(t, bobDir) // name resolution is cwd-relative
+	chdir(t, bobDir)                       // name resolution is cwd-relative
 	mustLogCount(t, bob, "renamed.txt", 2) // initial + move commit
 	if read(t, bobDir+"/renamed.txt") != "l1\nl2\nl3\nl4\nl5\n" {
 		t.Error("renamed file not materialized for bob")
@@ -691,7 +899,7 @@ func TestListRemote(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := alice.List(hub, false, &buf); err != nil {
+	if err := alice.List(hub, false, false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -712,7 +920,7 @@ func TestListRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf.Reset()
-	if err := alice.List(hub, false, &buf); err != nil {
+	if err := alice.List(hub, false, false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	out = buf.String()
@@ -733,7 +941,7 @@ func TestListLocalUnaffectedByRemoteArg(t *testing.T) {
 	snap(t, s, SnapshotOpts{}, "only.txt")
 
 	var buf bytes.Buffer
-	if err := s.List("", false, &buf); err != nil {
+	if err := s.List("", false, false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "only.txt") {

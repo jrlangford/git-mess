@@ -498,6 +498,19 @@ func (s *Store) pullOne(name string, out io.Writer) error {
 		fmt.Fprintf(out, "%s: remote deleted it, but local is newer — keeping (push to revive remotely)\n", name)
 		return nil
 	case stateRemoteDeleted:
+		localTip := loc.Active
+		if !loc.hasActive {
+			localTip = loc.Archive
+		}
+		if localTip != "" {
+			recovery, err := s.recoverDirtyDisk(name, localTip, rem.Tomb)
+			if err != nil {
+				return err
+			}
+			if recovery != "" {
+				fmt.Fprintf(out, "%s: saved dirty disk state as recovery %s\n", name, recovery)
+			}
+		}
 		if loc.hasActive {
 			if _, err := s.Git("update-ref", "-d", ref); err != nil {
 				return err
@@ -573,6 +586,39 @@ func (s *Store) pullOne(name string, out io.Writer) error {
 		}
 		return s.mergeHistory(name, rem.Active, out)
 	}
+}
+
+// recoverDirtyDisk preserves the exact current disk state before a remote
+// tombstone retires local history. The recovery commit is parented to the
+// local tip, so omitted paths record deletions while the prior bytes remain
+// reachable. Recovery refs are deliberately outside every sync refspec.
+func (s *Store) recoverDirtyDisk(name, localTip, tomb string) (string, error) {
+	id := name + "/" + tomb
+	if _, ok := s.RevParse("refs/mess-recovery/" + id); ok {
+		// A prior attempt may have installed the safety ref before a later
+		// tombstone step failed. Never replace that first observed disk state.
+		return id, nil
+	}
+	diskTree, err := s.DiskTree(localTip)
+	if err != nil {
+		return "", fmt.Errorf("git-mess: cannot preserve dirty history %s before applying remote tombstone: %w", name, err)
+	}
+	tipTree, err := s.Git("rev-parse", localTip+"^{tree}")
+	if err != nil {
+		return "", fmt.Errorf("git-mess: cannot inspect history %s before applying remote tombstone: %w", name, err)
+	}
+	if diskTree == tipTree {
+		return "", nil
+	}
+	commit, err := s.Git("commit-tree", diskTree, "-p", localTip, "-m",
+		fmt.Sprintf("recovery: %s before remote tombstone %s", name, tomb))
+	if err != nil {
+		return "", fmt.Errorf("git-mess: cannot create recovery snapshot for %s; remote tombstone not applied: %w", name, err)
+	}
+	if _, err := s.Git("update-ref", "refs/mess-recovery/"+id, commit); err != nil {
+		return "", fmt.Errorf("git-mess: cannot install recovery snapshot for %s; remote tombstone not applied: %w", name, err)
+	}
+	return id, nil
 }
 
 // Fetch downloads remote state into refs/mess-fetched/* (and its tombstone
