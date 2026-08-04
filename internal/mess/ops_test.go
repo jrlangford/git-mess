@@ -431,14 +431,14 @@ func TestArchiveLifecycle(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := s.List("", false, &buf); err != nil {
+	if err := s.List("", false, false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(buf.String(), "f.txt") {
 		t.Errorf("archived history in active listing:\n%s", buf.String())
 	}
 	buf.Reset()
-	if err := s.List("", true, &buf); err != nil {
+	if err := s.List("", true, false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "f.txt") {

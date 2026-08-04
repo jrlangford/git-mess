@@ -134,7 +134,7 @@ shared.txt  [a8d9cb6]
 old.txt     (deleted)
 ```
 
-Names whose deletion has propagated to the remote show `(deleted)`; remotely archived ones show `(archived)`; a name with both a live tip and a not-yet-applied tombstone shows `(tombstone pending)`. Locally, `git mess list --archived` lists your own archive instead of the active histories.
+Names whose deletion has propagated to the remote show `(deleted)`; remotely archived ones show `(archived)`; a name with both a live tip and a not-yet-applied tombstone shows `(tombstone pending)`. Locally, `git mess list --archived` lists your own archive instead of the active histories. `git mess list --recovery` lists local safety snapshots retained when a remote deletion met unsnapshotted disk changes; recovery snapshots are never queried from a remote.
 
 ### status — disk vs. last snapshot
 
@@ -348,9 +348,19 @@ Sync then works on a **newest-event-wins** rule, comparing the tombstone's times
 
 Tombstones are invisible to `list` and cost a few hundred bytes each. Remember the retention caveats from [What the remote keeps](#what-the-remote-keeps--and-what-it-doesnt) still apply: deletion propagates the *intent* everywhere, but each store's content is only physically gone after its own gc.
 
+If a newer remote tombstone would retire a history whose files differ from its local tip, `pull` first records the exact current disk state under a local-only recovery ref. Missing or non-regular recorded paths are omitted, including an empty tree when every path is missing; the recovery commit's parent retains the last snapshotted version. If creating or installing that recovery snapshot fails, the pull fails before applying the tombstone.
+
+The pull output prints the stable recovery identifier. Recovery snapshots remain until explicitly pruned and do not participate in clone, fetch, pull, or push:
+
+```bash
+git mess list --recovery
+git mess restore <recovery-id>          # reproduce files and recorded deletions
+git mess delete <recovery-id> --prune   # permanently remove the local safety copy
+```
+
 ## Pushing and pulling (plumbing)
 
-Under the hood, `push`/`fetch`/`pull` are ordinary git transfers of three namespaces — `refs/mess/*` (active histories), `refs/mess-archive/*` (archived ones), and `refs/mess-tombstones/*` (deletion markers) — a mess history is just a chain of commits under a ref, so it moves to and from any git repository: another bare store, a machine over SSH, or a hosted remote. Everything below works directly against the store if you ever need manual control.
+Under the hood, `push`/`fetch`/`pull` are ordinary git transfers of three namespaces — `refs/mess/*` (active histories), `refs/mess-archive/*` (archived ones), and `refs/mess-tombstones/*` (deletion markers) — a mess history is just a chain of commits under a ref, so it moves to and from any git repository: another bare store, a machine over SSH, or a hosted remote. The separate `refs/mess-recovery/*` namespace is intentionally local-only and absent from every transfer refspec. Everything below works directly against the store if you ever need manual control.
 
 The key property: **mess histories never move unless you name them explicitly.** A default `git push` only considers branches, and the store has none — so a mess can't leak into a push by accident. Transferring one always requires spelling out the `refs/mess/` refspec.
 

@@ -74,5 +74,17 @@ func (s *Store) ResolveRef(name string) (string, error) {
 	return ref, nil
 }
 
+// ResolveRecoveryRef validates and resolves a user-facing recovery identifier.
+func (s *Store) ResolveRecoveryRef(id string) (string, bool) {
+	ref := "refs/mess-recovery/" + strings.TrimPrefix(id, "/")
+	if _, err := RunGit("", "check-ref-format", ref); err != nil {
+		return "", false
+	}
+	if _, ok := s.RevParse(ref); !ok {
+		return "", false
+	}
+	return ref, true
+}
+
 // ShortName strips the ref namespace: refs/mess/<name> -> <name>.
 func ShortName(ref string) string { return strings.TrimPrefix(ref, "refs/mess/") }

@@ -17,8 +17,9 @@ const usage = `usage: git mess <command> [args]
   snapshot <file>... [-n <name>] [-m <msg>] [-f]  record a new version (-f: allow a file
                                                   already tracked by another history)
   snapshot --all [-m <msg>]                       re-snapshot every changed history
-  list [<remote>] [--archived]                    list active histories; --archived lists
-                                                  the archive; with a remote, list its names
+  list [<remote>] [--archived|--recovery]         list active histories; --archived lists
+                                                  the archive; --recovery lists local safety
+                                                  snapshots; with a remote, list its names
                                                   (no fetch), marking archived/deleted ones
   status [<name>...]                              disk vs last snapshot (all if no name)
   untracked [<dir>]                               files no history tracks (default: store
@@ -30,14 +31,15 @@ const usage = `usage: git mess <command> [args]
   show <name> [<rev>] [<path>]                    print file content at a version
   diff [<name>] [<rev1> [<rev2>]] [--disk]        diff versions (default: last change);
                                                   --disk: vs disk; no name: whole mess
-  restore <name>|--all [<rev>]                    write files back to their paths
+  restore <name>|<recovery-id>|--all [<rev>]      write files back to their paths
   move <old-name> <new-name>                      rename a history; if its file is still
                                                   on disk, move the file too
   archive <name>                                  retire a history, keeping it recoverable
   unarchive <name>                                return an archived history to active use
-  delete <name> [--prune]                         permanently remove an ARCHIVED history
+  delete <name>|<recovery-id> [--prune]           permanently remove an ARCHIVED history
                                                   (--prune: gc now); leaves a tombstone so
-                                                  peers delete too; active names are refused
+                                                  peers delete too; recovery snapshots require
+                                                  explicit --prune; active names are refused
   remote [add <name> <url> | remove <name>]       manage named remotes; no args lists them
   push [<remote> [<name>]]                        publish histories, tombstones, deletions
   fetch [<remote> [<name>]]                       download remote state and preview what
@@ -119,15 +121,21 @@ func main() {
 		}
 	case "list":
 		archived := false
+		recovery := false
 		remote := ""
 		for _, a := range args {
 			if a == "--archived" {
 				archived = true
+			} else if a == "--recovery" {
+				recovery = true
 			} else {
 				remote = a
 			}
 		}
-		err = s.List(remote, archived, out)
+		if archived && recovery {
+			usageExit()
+		}
+		err = s.List(remote, archived, recovery, out)
 	case "archive":
 		if len(args) < 1 {
 			usageExit()
