@@ -482,11 +482,38 @@ func TestUntrackedIgnoresArchived(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := s.Untracked("", &buf); err != nil {
+	if err := s.Untracked("", false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(buf.String(), "known.txt") {
 		t.Errorf("archived file should not be untracked:\n%s", buf.String())
+	}
+}
+
+// Regression for the docs-hub render leak (2026-08-05): the hub's
+// post-receive cleanup pipes untracked into rm, but archived files counted
+// as tracked, so an archive transition left the file rendered forever.
+// --active-only must list files whose only claim is an archive ref, while
+// active files stay tracked.
+func TestUntrackedActiveOnly(t *testing.T) {
+	s, dir := newLocalMess(t)
+	write(t, dir+"/archived.txt", "a\n")
+	write(t, dir+"/active.txt", "b\n")
+	snap(t, s, SnapshotOpts{}, "archived.txt")
+	snap(t, s, SnapshotOpts{}, "active.txt")
+	if err := s.Archive("archived.txt", testWriter(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := s.Untracked("", true, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "archived.txt") {
+		t.Errorf("--active-only should list the archived file:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "active.txt") {
+		t.Errorf("--active-only must not list an actively tracked file:\n%s", buf.String())
 	}
 }
 
@@ -585,7 +612,7 @@ func TestUntracked(t *testing.T) {
 	write(t, dir+"/sub/theirs.txt", "x\n")
 
 	var buf bytes.Buffer
-	if err := s.Untracked("", &buf); err != nil {
+	if err := s.Untracked("", false, &buf); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
