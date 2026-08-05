@@ -22,8 +22,10 @@ const usage = `usage: git mess <command> [args]
                                                   snapshots; with a remote, list its names
                                                   (no fetch), marking archived/deleted ones
   status [<name>...]                              disk vs last snapshot (all if no name)
-  untracked [<dir>]                               files no history tracks (default: store
-                                                  root, or cwd for the global store)
+  untracked [<dir>] [--active-only]               files no history tracks (default: store
+                                                  root, or cwd for the global store);
+                                                  --active-only: archived histories don't
+                                                  count as tracked (render-mirror cleanup)
   grep <pattern> [<name>...] [--history]          search content in latest versions;
                                                   --history: every version ever recorded;
                                                   --archived: search the archive instead
@@ -149,7 +151,16 @@ func main() {
 	case "status":
 		err = s.Status(args, out)
 	case "untracked":
-		err = s.Untracked(arg(args, 0), out)
+		activeOnly := false
+		var untrackedDir string
+		for _, a := range args {
+			if a == "--active-only" {
+				activeOnly = true
+			} else if untrackedDir == "" {
+				untrackedDir = a
+			}
+		}
+		err = s.Untracked(untrackedDir, activeOnly, out)
 	case "grep":
 		var pattern string
 		var names []string

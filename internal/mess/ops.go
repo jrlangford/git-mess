@@ -958,7 +958,15 @@ func (s *Store) Delete(name string, prune bool, out io.Writer) error {
 // Untracked lists files under dir (default: store root, or cwd for the
 // global store) that no history's latest version records. Subtrees owned
 // by another mess and .git directories are skipped.
-func (s *Store) Untracked(dir string, out io.Writer) error {
+//
+// By default archived histories still count as "tracked" — in a working
+// store their files may legitimately remain on disk pending unarchive, and
+// untracked's output is routinely piped to rm. activeOnly narrows the
+// tracked set to refs/mess only: for render mirrors (e.g. the docs-hub
+// workspace) "archived" means "no longer published", and the default made
+// archived files invisible to the mirror's cleanup — they kept rendering
+// forever while deletes cleaned up fine (tombstones drop both refs).
+func (s *Store) Untracked(dir string, activeOnly bool, out io.Writer) error {
 	if err := s.Ensure(); err != nil {
 		return err
 	}
@@ -979,8 +987,12 @@ func (s *Store) Untracked(dir string, out io.Writer) error {
 	if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
 		return fmt.Errorf("git-mess: no such directory: %s", dir)
 	}
+	namespaces := []string{"refs/mess", "refs/mess-archive"}
+	if activeOnly {
+		namespaces = []string{"refs/mess"}
+	}
 	tracked := map[string]bool{}
-	for _, ns := range []string{"refs/mess", "refs/mess-archive"} {
+	for _, ns := range namespaces {
 		for _, ref := range s.ForEachRef(ns) {
 			paths, err := s.TreePaths(ref)
 			if err != nil {
